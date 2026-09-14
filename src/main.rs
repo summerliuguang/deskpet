@@ -654,6 +654,7 @@ impl App {
         if self.settings.whisper_on
             && self.state == PetState::Idle
             && self.bubble_until.is_none()
+            && !self.chat_pending
             && !self.hidden
         {
             let i = (self.rand() % WHISPERS.len() as u64) as usize;
@@ -712,10 +713,27 @@ impl App {
         }
     }
 
+    /// 历史内存上限：50 条；3 条之前的图片数据直接剥离（base64 最大 4MB/张）
+    fn trim_history(&mut self) {
+        const MAX: usize = 50;
+        const KEEP_IMAGES: usize = 3;
+        if self.chat_history.len() > MAX {
+            let drop = self.chat_history.len() - MAX;
+            self.chat_history.drain(..drop);
+        }
+        let n = self.chat_history.len();
+        for (i, m) in self.chat_history.iter_mut().enumerate() {
+            if m.image.is_some() && i + KEEP_IMAGES < n {
+                m.image = None;
+            }
+        }
+    }
+
     /// 发送一条消息（文本或拖入的图片）：回复以气泡 + 语音呈现
     fn send_chat(&mut self, text: String, image: Option<String>) {
         self.chat_history
             .push(ChatMsg { role: Role::User, text, image: image.clone() });
+        self.trim_history();
         let history = if self.cfg.ai_ready() {
             Some(build_history(&self.cfg, &self.chat_history))
         } else {
@@ -754,6 +772,7 @@ impl App {
                 self.think_next = None;
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: "还没接入 AI".into(), image: None });
+                self.trim_history();
                 self.bubble_show("喵呜～我还没接入 AI！在 deskpet.exe 旁边放一个 deskpet.toml（照抄 .example 填 api_key）就能聊天啦");
                 if let Some(i) = &mut self.input {
                     i.clear_pending();
@@ -1321,8 +1340,12 @@ impl ApplicationHandler<PetEvent> for App {
                         self.press = None;
                         if matches!(
                             self.state,
-                            PetState::Thrown | PetState::Climb | PetState::Dragged
+                            PetState::Thrown
+                                | PetState::Climb
+                                | PetState::Dragged
+                                | PetState::Perch
                         ) {
+                            self.perch = None;
                             self.pos.1 = self.mon_bottom();
                             w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                             self.hang_until = None;
@@ -1359,6 +1382,7 @@ impl ApplicationHandler<PetEvent> for App {
                 };
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: reply.clone(), image: None });
+                self.trim_history();
                 let shown: String = reply.chars().take(120).collect();
                 self.bubble_show(&shown);
                 if let Some(i) = &mut self.input {

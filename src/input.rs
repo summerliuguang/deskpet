@@ -19,12 +19,6 @@ pub mod win {
     static KEY_PROXY: OnceLock<crate::PetEventProxy> = OnceLock::new();
     static LAST_FWD_MS: AtomicU64 = AtomicU64::new(0);
 
-    fn now_ms() -> u64 {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis() as u64)
-            .unwrap_or(0)
-    }
     static PAD_PROXY: OnceLock<crate::PetEventProxy> = OnceLock::new();
 
     /// 键盘低级钩子线程：必须泵消息才会收到事件
@@ -42,7 +36,7 @@ pub mod win {
     unsafe extern "system" fn keyboard_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
         // 回调必须快进快出：只做节流判断 + 投递事件
         if code >= 0 && wparam.0 as u32 == WM_KEYDOWN {
-            let now = now_ms();
+            let now = crate::now_ms();
             let last = LAST_FWD_MS.load(Ordering::Relaxed);
             // 100ms 节流：按键长按重复不再高频唤醒事件循环
             if now.saturating_sub(last) >= 100 {

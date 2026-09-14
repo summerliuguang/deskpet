@@ -60,10 +60,6 @@ struct Canvas {
 }
 
 impl Canvas {
-    fn new() -> Self {
-        Self { px: vec![0; SPRITE_W * SPRITE_W] }
-    }
-
     /// 画一个逻辑像素（自动放大）
     fn dot(&mut self, x: i32, y: i32, color: u32) {
         if x < 0 || y < 0 || x >= LOGICAL || y >= LOGICAL {
@@ -294,8 +290,23 @@ pub fn pose_to_frame(pose: &crate::model::Pose) -> Frame {
 
 /// 渲染一帧。expr: 0=自动跟随状态，否则钉选表情（对 Idle/Walk/Sit/Climb 生效）。
 pub fn render_frame(frame: Frame, gaze: (i32, i32), p: &Palette, expr: usize) -> Vec<u32> {
+    let mut out = Vec::new();
+    render_frame_into(&mut out, frame, gaze, p, expr);
+    out
+}
+
+/// 复用调用方缓冲的零分配版本（供模型层每帧调用）
+pub fn render_frame_into(
+    out: &mut Vec<u32>,
+    frame: Frame,
+    gaze: (i32, i32),
+    p: &Palette,
+    expr: usize,
+) {
     let (body, outline, eye) = (p.body, p.outline, p.eye);
-    let mut c = Canvas::new();
+    let mut c = Canvas { px: std::mem::take(out) };
+    c.px.clear();
+    c.px.resize(SPRITE_W * SPRITE_W, 0);
     match frame {
         Frame::IdleOpen => {
             base_cat(&mut c, p);
@@ -429,7 +440,20 @@ pub fn render_frame(frame: Frame, gaze: (i32, i32), p: &Palette, expr: usize) ->
     }
     // 自动描边：所有剪影外一圈染描边色
     c.outline_pass(outline);
-    c.px
+    *out = c.px;
+}
+
+/// 将 64x64 缓冲旋转 90 度：ccw=false 顺时针（左墙头朝上），true 逆时针（右墙）
+pub fn rotate90_into(out: &mut Vec<u32>, src: &[u32], ccw: bool) {
+    let n = SPRITE_W;
+    out.clear();
+    out.resize(n * n, 0);
+    for y in 0..n {
+        for x in 0..n {
+            let (nx, ny) = if ccw { (y, n - 1 - x) } else { (n - 1 - y, x) };
+            out[ny * n + nx] = src[y * n + x];
+        }
+    }
 }
 
 /// 托盘图标用 RGBA（32x32，由 64x64 帧隔行采样）
@@ -508,8 +532,9 @@ mod tests {
         use crate::model::{PixelCat, PetModel};
         let mut m = PixelCat::new();
         let base = pose(PetState::Walk, 0);
-        let upright = m.render(&base);
+        // 渲染缓冲是复用的：需要留存的帧先 to_vec
+        let upright = m.render(&base).to_vec();
         let climbed = m.render(&Pose { state: PetState::Climb, aux: -1, ..base });
-        assert_ne!(upright, climbed, "爬墙帧应有旋转");
+        assert_ne!(upright.as_slice(), climbed, "爬墙帧应有旋转");
     }
 }

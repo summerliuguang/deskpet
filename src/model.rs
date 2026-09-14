@@ -1,8 +1,9 @@
 //! 桌宠模型抽象层。
 //!
 //! 所有桌宠形象实现 [`PetModel`] trait：输入 Pose（状态/帧号/目光/表情/换装），
-//! 输出一块 ARGB 像素。内置实现是程序化像素猫；将来 Live2D/自制素材模型
-//! 只需另写一个 PetModel 实现，主程序和菜单无需改动。
+//! 输出一块 ARGB 像素切片（内部缓冲复用，每帧零分配）。内置实现是程序化像素猫；
+//! 将来 Live2D/自制素材模型只需另写一个 PetModel 实现——把 Pose 的语义化状态
+//! （走/坐/爬/伸懒腰/舔毛/吃/睡…）映射到模型自身的 motion/表情即可，主程序零改动。
 
 use crate::sprites;
 
@@ -57,7 +58,8 @@ pub trait PetModel: Send {
     fn size(&self) -> (u32, u32) {
         (64, 64)
     }
-    fn render(&mut self, pose: &Pose) -> Vec<u32>;
+    /// 渲染到内部复用缓冲并返回切片（每帧零分配）
+    fn render(&mut self, pose: &Pose) -> &[u32];
     fn set_costume(&mut self, idx: usize);
     fn set_expression(&mut self, idx: usize);
     fn costume(&self) -> usize;
@@ -69,6 +71,10 @@ pub struct PixelCat {
     costume: usize,
     expr: usize,
     info: ModelInfo,
+    /// 复用的渲染缓冲（避免每帧分配）
+    buf: Vec<u32>,
+    /// 爬墙旋转输出缓冲
+    rot_buf: Vec<u32>,
 }
 
 impl PixelCat {
@@ -76,6 +82,8 @@ impl PixelCat {
         Self {
             costume: 0,
             expr: 0,
+            buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
+            rot_buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
             info: ModelInfo {
                 name: "像素猫".into(),
                 costumes: sprites::COSTUMES.iter().map(|c| c.name.to_string()).collect(),
@@ -96,14 +104,15 @@ impl PetModel for PixelCat {
         &self.info
     }
 
-    fn render(&mut self, pose: &Pose) -> Vec<u32> {
+    fn render(&mut self, pose: &Pose) -> &[u32] {
         let palette = &sprites::COSTUMES[self.costume.min(sprites::COSTUMES.len() - 1)];
         let frame = sprites::pose_to_frame(pose);
-        let mut buf = sprites::render_frame(frame, pose.gaze, palette, pose.expr);
+        sprites::render_frame_into(&mut self.buf, frame, pose.gaze, palette, pose.expr);
         if pose.state == PetState::Climb && pose.aux != 0 {
-            buf = rotate90(buf, pose.aux < 0);
+            sprites::rotate90_into(&mut self.rot_buf, &self.buf, pose.aux < 0);
+            return &self.rot_buf;
         }
-        buf
+        &self.buf
     }
 
     fn set_costume(&mut self, idx: usize) {
@@ -118,18 +127,4 @@ impl PetModel for PixelCat {
     fn expression(&self) -> usize {
         self.expr
     }
-}
-
-/// 将 64x64 缓冲旋转 90 度：ccw=false 顺时针（左墙头朝上），true 逆时针（右墙）
-pub fn rotate90(buf: Vec<u32>, ccw: bool) -> Vec<u32> {
-    let n = crate::sprites::SPRITE_W;
-    let mut out = vec![0u32; n * n];
-    for y in 0..n {
-        for x in 0..n {
-            let v = buf[y * n + x];
-            let (nx, ny) = if ccw { (y, n - 1 - x) } else { (n - 1 - y, x) };
-            out[ny * n + nx] = v;
-        }
-    }
-    out
 }

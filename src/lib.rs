@@ -41,8 +41,15 @@ impl MonRect {
     }
 }
 
+/// 毫秒级 UNIX 时间戳（供节流/计时的小工具）
+pub fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
 /// softbuffer 0.4 的泛型参数直接持有窗口句柄，用 Arc<Window> 保证 'static
-pub type SbContext = softbuffer::Context<std::sync::Arc<winit::window::Window>>;
 pub type SbSurface =
     softbuffer::Surface<std::sync::Arc<winit::window::Window>, std::sync::Arc<winit::window::Window>>;
 

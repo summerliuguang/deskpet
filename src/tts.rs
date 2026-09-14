@@ -9,20 +9,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static LAST_START_MS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(windows)]
-fn now_ms() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 /// enabled = 运行时开关（右键菜单"语音：开/关"）；cfg.voice 只作为启动初值
 #[cfg(windows)]
 pub fn speak(client: &crate::ai::Client, cfg: &crate::config::Config, enabled: bool, text: &str) {
     if !enabled || text.is_empty() {
         return;
     }
-    let now = now_ms();
+    let now = crate::now_ms();
     if now.saturating_sub(LAST_START_MS.load(Ordering::Relaxed)) < 1500 {
         return;
     }
