@@ -1,0 +1,35 @@
+# deskpet 配置示例 —— 把本文件复制一份改名为 deskpet.toml，放在 deskpet.exe 旁边
+# 所有字段都有默认值；api_key 留空 = 离线模式（聊天会提示未接入）
+
+# OpenAI 兼容接口入口（本机 LiteGate 局域网入口；自签证书客户端已自动跳过校验）
+base_url = "https://your-gateway.example/v1"
+
+# 虚拟密钥（在 LiteGate 管理台 https://your-gateway.example 签发，sk-lg- 开头）
+# 也可以用环境变量 DESKPET_API_KEY 传入，避免落盘
+api_key = ""
+
+# 聊天模型：默认走网关上的免费模型（:free，$0）
+# 可选的免费模型还有 nvidia/nemotron-3-ultra-550b-a55b:free（更大更慢）
+model = "nvidia/nemotron-3-super-120b-a12b:free"
+
+# 图片识别模型：免费模型不支持图片输入，这里单独指定便宜的支持视觉的模型
+# （只在你主动拖图时才调用；想全免费就把它也改成 free 模型，但拖图会报错）
+vision_model = "deepseek-flash"
+
+# 猫的名字（聊天窗标题）与性格提示词
+pet_name = "团子"
+system_prompt = "你是趴在主人 Windows 桌面上的小猫，名字叫团子。用中文回复，简短可爱，不超过 60 字，可以偶尔用颜文字。"
+
+# ---- 语音（LiteGate MiMo TTS，限时免费）----
+# 右键菜单可临时开关；音色可选 mimo_default/冰糖/茉莉/苏打/白桦/Mia/Chloe/Milo/Dean
+voice = true
+tts_voice = "mimo_default"
+
+# ---- 提醒（分钟，0 = 关闭该项）----
+drink_minutes = 45
+sit_minutes = 90
+
+# ---- 输入联动 ----
+# 打字时猫跟着拍爪；手柄按 A/B/X/Y 时猫有反应
+keyboard_link = true
+gamepad_link = true

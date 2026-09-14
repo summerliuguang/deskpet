@@ -1,0 +1,59 @@
+pub mod ai;
+pub mod bubble;
+pub mod inputbox;
+pub mod config;
+pub mod input;
+pub mod menu;
+pub mod model;
+pub mod sprites;
+pub mod text;
+pub mod todo;
+pub mod tts;
+
+/// 事件循环用户事件
+#[derive(Debug, Clone)]
+pub enum PetEvent {
+    /// 前台全屏状态变化
+    FullscreenChanged(bool),
+    /// AI 回复到达
+    ChatReply(Result<String, String>),
+    /// 全局键盘有按键（打字联动）
+    Typing,
+    /// 手柄按键
+    Gamepad,
+}
+
+pub type PetEventProxy = winit::event_loop::EventLoopProxy<PetEvent>;
+
+/// 显示器矩形（多屏适配）
+#[derive(Debug, Clone, Copy)]
+pub struct MonRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+impl MonRect {
+    pub fn contains_center(&self, px: i32, py: i32, size: i32) -> bool {
+        let (cx, cy) = (px + size / 2, py + size / 2);
+        cx >= self.x && cx < self.x + self.w && cy >= self.y && cy < self.y + self.h
+    }
+}
+
+/// softbuffer 0.4 的泛型参数直接持有窗口句柄，用 Arc<Window> 保证 'static
+pub type SbContext = softbuffer::Context<std::sync::Arc<winit::window::Window>>;
+pub type SbSurface =
+    softbuffer::Surface<std::sync::Arc<winit::window::Window>, std::sync::Arc<winit::window::Window>>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn monrect_contains_center() {
+        let m = MonRect { x: 100, y: 0, w: 800, h: 600 };
+        assert!(m.contains_center(400, 300, 64));
+        assert!(!m.contains_center(0, 0, 64), "左屏外的点不应命中");
+    }
+}
