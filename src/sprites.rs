@@ -35,6 +35,53 @@ pub const COSTUMES: &[Palette] = &[
 
 pub const EXPRESSIONS: &[&str] = &["自动", "开心", "惊讶", "困困", "星星眼", "脸红"];
 
+/// 模型物种（同一套骨骼/动作，不同外形）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Species {
+    Cat,
+    Shiba,
+    Bunny,
+    Penguin,
+}
+
+pub const SPECIES_NAMES: &[&str] = &["像素猫", "柴犬", "兔兔", "企鹅"];
+
+pub fn species_of(kind: usize) -> Species {
+    match kind {
+        0 => Species::Cat,
+        1 => Species::Shiba,
+        2 => Species::Bunny,
+        _ => Species::Penguin,
+    }
+}
+
+/// 每个物种的配色（换装）
+pub fn palettes(sp: Species) -> &'static [Palette] {
+    match sp {
+        Species::Cat => &[
+            Palette { name: "橘猫", body: 0xFFE8A33D, belly: 0xFFFFF3DC, outline: 0xFF6B4A1E, eye: DARK },
+            Palette { name: "白猫", body: 0xFFEFEDE6, belly: 0xFFFBFAF6, outline: 0xFFB9B4A8, eye: 0xFF5A5348 },
+            Palette { name: "黑猫", body: 0xFF474252, belly: 0xFF625C6E, outline: 0xFF232028, eye: 0xFFE8E4DA },
+            Palette { name: "粉猫", body: 0xFFF3BCC9, belly: 0xFFFCE9EE, outline: 0xFFC98A9C, eye: 0xFF5A4A50 },
+        ],
+        Species::Shiba => &[
+            Palette { name: "赤柴", body: 0xFFD29A55, belly: 0xFFFFF0D8, outline: 0xFF7A4E1C, eye: DARK },
+            Palette { name: "白柴", body: 0xFFF2E6CE, belly: 0xFFFBF6E8, outline: 0xFFB49A6C, eye: DARK },
+        ],
+        Species::Bunny => &[
+            Palette { name: "白兔", body: 0xFFF7F4EE, belly: 0xFFFFFBF8, outline: 0xFFBDB5A6, eye: 0xFF5A5348 },
+            Palette { name: "灰兔", body: 0xFFA9A6B2, belly: 0xFFD8D6DE, outline: 0xFF6E6A78, eye: DARK },
+        ],
+        Species::Penguin => &[
+            Palette { name: "企鹅", body: 0xFF2E3440, belly: 0xFFF8F6F0, outline: 0xFF14161A, eye: 0xFFECEFF4 },
+            Palette { name: "蓝企鹅", body: 0xFF4C6A92, belly: 0xFFEFE9DA, outline: 0xFF26364C, eye: 0xFFECEFF4 },
+        ],
+    }
+}
+
+/// 橙色部件（企鹅喙/脚）
+const BEAK: u32 = 0xFFF09B4A;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Frame {
     IdleOpen,
@@ -113,17 +160,42 @@ impl Canvas {
     }
 }
 
-/// 站姿猫主体（头 + 身体 + 口鼻/胡须/内耳细节）
-fn base_cat(c: &mut Canvas, p: &Palette) {
+/// 站姿主体（按物种绘制耳朵/口鼻/胡须/整体形态）
+fn base_cat(c: &mut Canvas, p: &Palette, sp: Species) {
     let (body, belly, pink) = (p.body, p.belly, PINK);
+    if sp == Species::Penguin {
+        // 企鹅：蛋形身体 + 白肚 + 喙 + 鳍状翅 + 橙脚
+        c.rect(3, 3, 12, 14, body);
+        c.rect(5, 6, 10, 13, belly);
+        c.rect(2, 7, 3, 12, body); // 左翅
+        c.rect(12, 7, 13, 12, body); // 右翅
+        c.rect(6, 14, 8, 15, BEAK); // 脚
+        c.rect(9, 14, 11, 15, BEAK);
+        return;
+    }
     // 耳朵
-    c.rect(3, 1, 4, 2, body);
-    c.rect(11, 1, 12, 2, body);
+    match sp {
+        Species::Bunny => {
+            c.rect(4, 0, 5, 4, body);
+            c.rect(10, 0, 11, 4, body);
+            c.rect(4, 1, 4, 3, pink);
+            c.rect(11, 1, 11, 3, pink);
+        }
+        Species::Shiba => {
+            c.rect(2, 1, 4, 3, body);
+            c.rect(11, 1, 13, 3, body);
+            c.rect(3, 2, 3, 2, pink);
+            c.rect(12, 2, 12, 2, pink);
+        }
+        _ => {
+            c.rect(3, 1, 4, 2, body);
+            c.rect(11, 1, 12, 2, body);
+            c.rect(3, 2, 4, 2, pink);
+            c.rect(11, 2, 12, 2, pink);
+        }
+    }
     // 头
     c.rect(3, 3, 12, 9, body);
-    // 内耳
-    c.rect(3, 2, 4, 2, pink);
-    c.rect(11, 2, 12, 2, pink);
     // 身体
     c.rect(4, 10, 11, 14, body);
     // 肚子
@@ -131,15 +203,25 @@ fn base_cat(c: &mut Canvas, p: &Palette) {
     // 前爪
     c.rect(4, 15, 5, 15, body);
     c.rect(10, 15, 11, 15, body);
-    // 白口鼻
-    c.rect(6, 7, 9, 8, belly);
-    // 鼻子
-    c.rect(7, 6, 8, 7, pink);
-    // 胡须
-    c.dot(1, 6, p.outline);
-    c.dot(1, 8, p.outline);
-    c.dot(14, 6, p.outline);
-    c.dot(14, 8, p.outline);
+    // 口鼻
+    match sp {
+        Species::Shiba => {
+            c.rect(5, 6, 10, 9, belly);
+            c.rect(7, 6, 8, 7, DARK); // 深色鼻头
+        }
+        Species::Bunny => {
+            c.rect(7, 6, 8, 6, pink); // 兔鼻
+        }
+        _ => {
+            c.rect(6, 7, 9, 8, belly);
+            c.rect(7, 6, 8, 7, pink);
+            // 胡须
+            c.dot(1, 6, p.outline);
+            c.dot(1, 8, p.outline);
+            c.dot(14, 6, p.outline);
+            c.dot(14, 8, p.outline);
+        }
+    }
 }
 
 /// 睁眼，瞳孔按 gaze=(gx,gy) ∈ {-1,0,1} 偏移（目光跟随）
@@ -200,22 +282,45 @@ fn neutral_mouth(c: &mut Canvas, outline: u32) {
     c.dot(9, 8, outline);
 }
 
-fn tail_sway(c: &mut Canvas, up: bool, body: u32) {
-    if up {
-        c.rect(13, 8, 13, 13, body);
-        c.dot(12, 7, body);
-        c.dot(13, 6, PINK); // 尾尖
-    } else {
-        c.rect(13, 12, 13, 14, body);
-        c.rect(12, 11, 12, 13, body);
-        c.dot(13, 14, PINK);
+fn tail_sway(c: &mut Canvas, up: bool, body: u32, sp: Species) {
+    match sp {
+        Species::Shiba => {
+            // 柴犬卷尾：背上的圆环
+            c.rect(12, 8, 14, 10, body);
+            c.rect(13, 7, 14, 7, body);
+            c.dot(12, 10, body);
+        }
+        Species::Bunny => {
+            // 兔圆尾
+            c.rect(12, 11, 14, 13, PINK);
+        }
+        Species::Penguin => {}
+        _ => {
+            if up {
+                c.rect(13, 8, 13, 13, body);
+                c.dot(12, 7, body);
+                c.dot(13, 6, PINK);
+            } else {
+                c.rect(13, 12, 13, 14, body);
+                c.rect(12, 11, 12, 13, body);
+                c.dot(13, 14, PINK);
+            }
+        }
     }
 }
 
-fn tail_up(c: &mut Canvas, body: u32) {
-    c.rect(13, 5, 13, 13, body);
-    c.dot(12, 4, body);
-    c.dot(13, 4, PINK);
+fn tail_up(c: &mut Canvas, body: u32, sp: Species) {
+    match sp {
+        Species::Shiba => {
+            c.rect(12, 8, 14, 10, body);
+            c.rect(13, 7, 14, 7, body);
+        }
+        _ => {
+            c.rect(13, 5, 13, 13, body);
+            c.dot(12, 4, body);
+            c.dot(13, 4, PINK);
+        }
+    }
 }
 
 fn draw_zzz(c: &mut Canvas) {
@@ -249,6 +354,81 @@ fn pinned_face(c: &mut Canvas, p: &Palette, expr: usize) {
             smile(c, p.outline);
         }
         _ => {}
+    }
+}
+
+/// 企鹅：蛋形身体 + 鳍翅 + 喙脚，各动作的专属绘制
+fn penguin_frame(c: &mut Canvas, frame: Frame, _expr: usize, p: &Palette) {
+    let body = p.body;
+    let stand = |c: &mut Canvas| {
+        c.rect(3, 3, 12, 14, body); // 蛋形身体
+        c.rect(5, 6, 10, 13, p.belly); // 白肚
+        c.rect(2, 7, 3, 12, body); // 翅膀
+        c.rect(12, 7, 13, 12, body);
+        c.rect(6, 14, 8, 15, BEAK); // 脚
+        c.rect(9, 14, 11, 15, BEAK);
+    };
+    match frame {
+        Frame::IdleOpen | Frame::SitA => {
+            stand(c);
+            open_eyes(c, (0, 0), p.eye);
+            c.rect(6, 8, 9, 9, BEAK);
+        }
+        Frame::IdleBlink | Frame::SitB => {
+            stand(c);
+            closed_eyes(c, p.eye);
+            c.rect(6, 8, 9, 9, BEAK);
+        }
+        Frame::Happy | Frame::WalkA | Frame::WalkB => {
+            stand(c);
+            happy_eyes(c, p.eye);
+            // 摇摆：左右翅膀一只抬起
+            let left_up = frame != Frame::WalkB;
+            c.rect(if left_up { 1 } else { 2 }, 6, 3, 11, body);
+            c.rect(if left_up { 12 } else { 13 }, 6, 14, 11, body);
+            c.rect(6, 8, 9, 9, BEAK);
+        }
+        Frame::Shock | Frame::DraggedA | Frame::DraggedB => {
+            stand(c);
+            shock_eyes(c, p.eye);
+            c.rect(6, 8, 9, 10, BEAK); // 张嘴
+            c.rect(1, 5, 3, 10, body); // 翅膀张开
+            c.rect(12, 5, 14, 10, body);
+        }
+        Frame::GroomA | Frame::GroomB => {
+            stand(c);
+            open_eyes(c, (0, 0), p.eye);
+            // 扑翅
+            let up = frame == Frame::GroomA;
+            c.rect(1, if up { 4 } else { 7 }, 3, 11, body);
+            c.rect(12, if up { 4 } else { 7 }, 14, 11, body);
+            c.rect(6, 8, 9, 9, BEAK);
+        }
+        Frame::EatA | Frame::EatB => {
+            stand(c);
+            closed_eyes(c, p.eye);
+            let dip = if frame == Frame::EatA { 0 } else { 1 };
+            c.rect(6, 9 + dip, 9, 10 + dip, BEAK); // 低头啄
+            c.rect(4, 14, 12, 15, 0xFF8A7A6A); // 小鱼碗
+        }
+        Frame::Stretch => {
+            stand(c);
+            // 仰头挺胸
+            c.rect(3, 4, 12, 13, body);
+            c.rect(5, 7, 10, 12, p.belly);
+            c.rect(1, 3, 3, 9, body);
+            c.rect(12, 3, 14, 9, body);
+            closed_eyes(c, p.eye);
+            c.rect(6, 7, 9, 8, BEAK);
+        }
+        Frame::Sleep => {
+            // 站着睡：头低下收进肩膀
+            c.rect(3, 5, 12, 15, body);
+            c.rect(5, 8, 10, 14, p.belly);
+            closed_eyes(c, p.eye);
+            c.rect(6, 10, 9, 11, BEAK);
+            draw_zzz(c);
+        }
     }
 }
 
@@ -289,9 +469,15 @@ pub fn pose_to_frame(pose: &crate::model::Pose) -> Frame {
 }
 
 /// 渲染一帧。expr: 0=自动跟随状态，否则钉选表情（对 Idle/Walk/Sit/Climb 生效）。
-pub fn render_frame(frame: Frame, gaze: (i32, i32), p: &Palette, expr: usize) -> Vec<u32> {
+pub fn render_frame(
+    frame: Frame,
+    gaze: (i32, i32),
+    p: &Palette,
+    expr: usize,
+    sp: Species,
+) -> Vec<u32> {
     let mut out = Vec::new();
-    render_frame_into(&mut out, frame, gaze, p, expr);
+    render_frame_into(&mut out, frame, gaze, p, expr, sp);
     out
 }
 
@@ -302,62 +488,75 @@ pub fn render_frame_into(
     gaze: (i32, i32),
     p: &Palette,
     expr: usize,
+    sp: Species,
 ) {
     let (body, outline, eye) = (p.body, p.outline, p.eye);
     let mut c = Canvas { px: std::mem::take(out) };
     c.px.clear();
     c.px.resize(SPRITE_W * SPRITE_W, 0);
+    if sp == Species::Penguin {
+        penguin_frame(&mut c, frame, expr, p);
+        c.outline_pass(outline);
+        *out = c.px;
+        return;
+    }
     match frame {
         Frame::IdleOpen => {
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             if expr > 0 {
                 pinned_face(&mut c, p, expr);
             } else {
                 open_eyes(&mut c, gaze, eye);
                 neutral_mouth(&mut c, outline);
             }
-            tail_sway(&mut c, false, body);
+            tail_sway(&mut c, false, body, sp);
         }
         Frame::IdleBlink => {
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             closed_eyes(&mut c, eye);
             neutral_mouth(&mut c, outline);
-            tail_sway(&mut c, false, body);
+            tail_sway(&mut c, false, body, sp);
         }
         Frame::Happy => {
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             happy_eyes(&mut c, eye);
             smile(&mut c, outline);
-            tail_sway(&mut c, true, body);
+            tail_sway(&mut c, true, body, sp);
         }
         Frame::Shock => {
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             shock_eyes(&mut c, eye);
             open_mouth(&mut c, outline);
-            tail_up(&mut c, body);
+            tail_up(&mut c, body, sp);
         }
         Frame::WalkA | Frame::WalkB => {
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             if expr > 0 {
                 pinned_face(&mut c, p, expr);
             } else {
                 open_eyes(&mut c, gaze, eye);
                 neutral_mouth(&mut c, outline);
             }
+            // 企鹅左右摇摆
+            if sp == Species::Penguin {
+                let (lx, rx) = if frame == Frame::WalkA { (1, 4) } else { (4, 1) };
+                c.rect(1, 7 + lx / 2, 2, 12, body); // 翅膀摆动
+                c.rect(13, 7 + rx / 2, 14, 12, body);
+            }
             if frame == Frame::WalkA {
-                tail_sway(&mut c, true, body);
+                tail_sway(&mut c, true, body, sp);
                 c.rect(4, 13, 5, 14, body); // 左前爪抬起
             } else {
-                tail_sway(&mut c, false, body);
+                tail_sway(&mut c, false, body, sp);
                 c.rect(10, 13, 11, 14, body); // 右前爪抬起
             }
         }
         Frame::DraggedA | Frame::DraggedB => {
             // 被拎起来：惊吓脸 + 前爪朝上 + 后腿悬空乱蹬
-            base_cat(&mut c, p);
+            base_cat(&mut c, p, sp);
             shock_eyes(&mut c, eye);
             open_mouth(&mut c, outline);
-            tail_up(&mut c, body);
+            tail_up(&mut c, body, sp);
             c.rect(3, 9, 4, 10, body); // 前爪举起
             c.rect(11, 9, 12, 10, body);
             c.rect(5, 15, 6, 15, body);
@@ -371,6 +570,10 @@ pub fn render_frame_into(
         }
         Frame::SitA | Frame::SitB => {
             // 端坐：身体压实，尾巴绕到身前
+            let body_only = sp == Species::Penguin;
+            if body_only {
+                c.rect(3, 5, 12, 15, body); // 企鹅坐着更矮
+            }
             c.rect(4, 8, 11, 15, body);
             c.rect(3, 1, 4, 2, body);
             c.rect(11, 1, 12, 2, body);
@@ -383,8 +586,10 @@ pub fn render_frame_into(
                 open_eyes(&mut c, gaze, eye);
                 neutral_mouth(&mut c, outline);
             }
-            c.rect(5, 15, 6, 15, body);
-            c.rect(9, 15, 10, 15, body);
+            if !body_only {
+                c.rect(5, 15, 6, 15, body);
+                c.rect(9, 15, 10, 15, body);
+            }
             if frame == Frame::SitB {
                 // 尾巴尖翘起
                 c.rect(3, 14, 3, 15, body);
@@ -458,7 +663,7 @@ pub fn rotate90_into(out: &mut Vec<u32>, src: &[u32], ccw: bool) {
 
 /// 托盘图标用 RGBA（32x32，由 64x64 帧隔行采样）
 pub fn tray_icon_rgba() -> Vec<u8> {
-    let full = render_frame(Frame::IdleOpen, (0, 0), &COSTUMES[0], 0);
+    let full = render_frame(Frame::IdleOpen, (0, 0), &COSTUMES[0], 0, Species::Cat);
     let mut rgba = Vec::with_capacity(32 * 32 * 4);
     for y in (0..SPRITE_W).step_by(2) {
         for x in (0..SPRITE_W).step_by(2) {
@@ -511,7 +716,25 @@ mod tests {
     }
 
     #[test]
-    fn all_frames_render_for_all_costumes() {
+    fn all_frames_render_for_all_species() {
+        for si in 0..4 {
+            let sp = species_of(si);
+            let p = &palettes(sp)[0];
+            for f in [
+                Frame::IdleOpen, Frame::IdleBlink, Frame::Happy, Frame::Shock,
+                Frame::WalkA, Frame::WalkB, Frame::DraggedA, Frame::DraggedB, Frame::Sleep,
+                Frame::SitA, Frame::SitB, Frame::Stretch, Frame::GroomA, Frame::GroomB,
+                Frame::EatA, Frame::EatB,
+            ] {
+                let buf = render_frame(f, (1, -1), p, 0, sp);
+                assert_eq!(buf.len(), SPRITE_W * SPRITE_W);
+                assert!(buf.iter().any(|&px| px != 0), "帧不能全透明 {f:?} 物种{si}");
+            }
+        }
+    }
+
+    #[test]
+    fn all_frames_render_for_all_costumes_cat() {
         for ci in 0..COSTUMES.len() {
             for f in [
                 Frame::IdleOpen, Frame::IdleBlink, Frame::Happy, Frame::Shock,
@@ -529,8 +752,8 @@ mod tests {
 
     #[test]
     fn model_renders_climb_rotated() {
-        use crate::model::{PixelCat, PetModel};
-        let mut m = PixelCat::new();
+        use crate::model::{make_model, PetModel};
+        let mut m = make_model(0);
         let base = pose(PetState::Walk, 0);
         // 渲染缓冲是复用的：需要留存的帧先 to_vec
         let upright = m.render(&base).to_vec();

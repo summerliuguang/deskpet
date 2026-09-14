@@ -29,6 +29,7 @@ const PRESSED_BG: u32 = 0x90C07A28;
 pub enum Page {
     Root,
     Fun,
+    Model,
     Costume,
     Expr,
     Set,
@@ -87,6 +88,7 @@ fn page_from_id(id: &str) -> Option<Page> {
         "Fun" => Page::Fun,
         "Costume" => Page::Costume,
         "Expr" => Page::Expr,
+        "Model" => Page::Model,
         "Set" => Page::Set,
         _ => return None,
     })

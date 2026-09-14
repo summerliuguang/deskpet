@@ -1,10 +1,10 @@
 /// 调试工具（仅本机预览用）：把所有精灵帧导出成 PPM 图片。
 /// 运行：cargo run --bin dump_frames，输出到 /tmp/pet_frames/
-use deskpet::model::{PetModel, PetState, PixelCat};
+use deskpet::model::{make_model, PetState};
 use deskpet::sprites::{self, COSTUMES};
 
 fn main() {
-    let mut model = PixelCat::new();
+    let mut model = make_model(0);
     let cases: &[(&str, PetState, (i32, i32), usize, usize)] = &[
         ("1_idle_open", PetState::Idle, (0, 0), 0, 0),
         ("1b_idle_open_gaze_r", PetState::Idle, (1, 0), 0, 0),
@@ -62,6 +62,18 @@ fn main() {
     }
     std::fs::write("/tmp/pet_frames/99_text_preview.ppm", out).unwrap();
 
+    // 四个物种预览（走路帧）
+    for kind in 0..4usize {
+        let mut m = make_model(kind);
+        let walk = PetState::Walk;
+        let pose = deskpet::model::Pose {
+            state: walk, tick: 0, gaze: (0, 0), expr: 0, costume: 0, aux: 0, typing: false,
+        };
+        let rgb = sprites::argb_to_rgb(&m.render(&pose));
+        let mut out = format!("P6\n{} {}\n255\n", m.size().0, m.size().1).into_bytes();
+        out.extend_from_slice(&rgb);
+        std::fs::write(format!("/tmp/pet_frames/species_{kind}.ppm"), out).unwrap();
+    }
     println!(" costumes: {:?}", names);
     println!("done: /tmp/pet_frames/*.ppm");
 }

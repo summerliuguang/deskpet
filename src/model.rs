@@ -66,8 +66,9 @@ pub trait PetModel: Send {
     fn expression(&self) -> usize;
 }
 
-/// 内置像素猫
-pub struct PixelCat {
+/// 内置像素宠物（猫/柴犬/兔兔/企鹅共用骨骼，不同外形）
+pub struct PixelPet {
+    species: sprites::Species,
     costume: usize,
     expr: usize,
     info: ModelInfo,
@@ -77,37 +78,44 @@ pub struct PixelCat {
     rot_buf: Vec<u32>,
 }
 
-impl PixelCat {
-    pub fn new() -> Self {
+impl PixelPet {
+    pub fn new(kind: usize) -> Self {
+        let species = sprites::species_of(kind);
         Self {
+            species,
             costume: 0,
             expr: 0,
             buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
             rot_buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
             info: ModelInfo {
-                name: "像素猫".into(),
-                costumes: sprites::COSTUMES.iter().map(|c| c.name.to_string()).collect(),
+                name: sprites::SPECIES_NAMES[kind.min(sprites::SPECIES_NAMES.len() - 1)].into(),
+                costumes: sprites::palettes(species).iter().map(|c| c.name.to_string()).collect(),
                 expressions: sprites::EXPRESSIONS.iter().map(|s| s.to_string()).collect(),
             },
         }
     }
 }
 
-impl Default for PixelCat {
-    fn default() -> Self {
-        Self::new()
-    }
+/// 内置模型清单（模型选择页用）
+pub fn model_names() -> Vec<String> {
+    sprites::SPECIES_NAMES.iter().map(|s| s.to_string()).collect()
 }
 
-impl PetModel for PixelCat {
+/// 按种类构建模型
+pub fn make_model(kind: usize) -> Box<dyn PetModel> {
+    Box::new(PixelPet::new(kind))
+}
+
+impl PetModel for PixelPet {
     fn info(&self) -> &ModelInfo {
         &self.info
     }
 
     fn render(&mut self, pose: &Pose) -> &[u32] {
-        let palette = &sprites::COSTUMES[self.costume.min(sprites::COSTUMES.len() - 1)];
+        let pals = sprites::palettes(self.species);
+        let palette = &pals[self.costume.min(pals.len() - 1)];
         let frame = sprites::pose_to_frame(pose);
-        sprites::render_frame_into(&mut self.buf, frame, pose.gaze, palette, pose.expr);
+        sprites::render_frame_into(&mut self.buf, frame, pose.gaze, palette, pose.expr, self.species);
         if pose.state == PetState::Climb && pose.aux != 0 {
             sprites::rotate90_into(&mut self.rot_buf, &self.buf, pose.aux < 0);
             return &self.rot_buf;

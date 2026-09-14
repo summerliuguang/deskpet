@@ -18,7 +18,7 @@ use deskpet::{
     config::{Config, Settings},
     inputbox::{InputAction, InputBox},
     menu::{Entry, MenuOutcome, MenuWin, Page},
-    model::{PetModel, PetState, Pose, PixelCat},
+    model::{make_model, model_names, PetModel, PetState, Pose},
     todo::{TodoAction, TodoWin},
     tts, MonRect, PetEvent, PetEventProxy, SbSurface,
 };
@@ -77,6 +77,7 @@ struct App {
     cfg: Config,
     settings: Settings,
     model: Box<dyn PetModel>,
+    model_kind: usize,
 
     state: PetState,
     tick: u32,
@@ -133,7 +134,8 @@ impl App {
             client: Client::new(),
             cfg,
             settings,
-            model: Box::new(PixelCat::new()),
+            model: make_model(0),
+            model_kind: 0,
             state: PetState::Idle,
             tick: 0,
             state_len: 60,
@@ -824,6 +826,7 @@ impl App {
             Entry::item("pet-todo", "待办清单"),
             Entry::sep(),
             Entry::sub(Page::Fun, "▸ 互动"),
+            Entry::sub(Page::Model, "▸ 模型"),
             Entry::sub(Page::Costume, "▸ 换装"),
             Entry::sub(Page::Expr, "▸ 表情"),
             Entry::sub(Page::Set, "▸ 设置"),
@@ -848,6 +851,22 @@ impl App {
             Entry::item("pet-throw", "扔个窗口"),
             Entry::stay("pet-say", "说句话"),
         ]
+    }
+
+    fn model_entries(&self) -> Vec<Entry> {
+        let cur = self.model_kind;
+        let mut v: Vec<Entry> = model_names()
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                Entry::stay(
+                    &format!("model-{i}"),
+                    format!("{} {}", if i == cur { "●" } else { "○" }, name),
+                )
+            })
+            .collect();
+        v.push(Entry::back());
+        v
     }
 
     fn costume_entries(&self) -> Vec<Entry> {
@@ -1001,6 +1020,19 @@ impl App {
                 ));
             }
             "pet-perch" => self.perch_on_window(),
+            other if other.starts_with("model-") => {
+                if let Ok(i) = other.strip_prefix("model-").unwrap().parse::<usize>() {
+                    if i != self.model_kind {
+                        self.model_kind = i;
+                        self.model = make_model(i);
+                        let name = self.model.info().name.clone();
+                        self.bubble_show(&format!("嗨！我是{name}～"));
+                        if let Some(w) = &self.window {
+                            w.request_redraw();
+                        }
+                    }
+                }
+            }
             other => {
                 if let Some(n) = other.strip_prefix("costume-") {
                     if let Ok(i) = n.parse::<usize>() {
@@ -1220,6 +1252,7 @@ impl ApplicationHandler<PetEvent> for App {
                             let mut menu = self.menu.take().unwrap();
                             let entries = match menu.page() {
                                 Page::Root => self.root_entries(),
+                                Page::Model => self.model_entries(),
                                 Page::Fun => self.fun_entries(),
                                 Page::Costume => self.costume_entries(),
                                 Page::Expr => self.expr_entries(),
