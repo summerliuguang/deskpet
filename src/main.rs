@@ -698,7 +698,12 @@ impl App {
         let Some(surface) = &mut self.surface else { return };
         if let Ok(mut buf) = surface.buffer_mut() {
             for (dst, src) in buf.iter_mut().zip(sprite.iter()) {
-                *dst = *src;
+                // 透明像素填色键（分层窗口：视觉透明 + 点击穿透）
+                *dst = if src & 0xFF000000 == 0 {
+                    COLORKEY
+                } else {
+                    0xFF000000 | (src & 0x00FFFFFF)
+                };
             }
             let _ = buf.present();
         }
@@ -1251,6 +1256,11 @@ impl ApplicationHandler<PetEvent> for App {
             }
         };
         dlog("渲染就绪（softbuffer）");
+        #[cfg(windows)]
+        {
+            let ok = hwnd_of(&window).map(|h| unsafe { enable_colorkey(h) }).unwrap_or(false);
+            dlog(if ok { "色键分层已启用（透明区域点击穿透）" } else { "色键分层启用失败" });
+        }
         if surface
             .resize(
                 NonZeroU32::new(self.pet_size as u32).unwrap(),
@@ -1444,9 +1454,10 @@ impl ApplicationHandler<PetEvent> for App {
                         NonZeroU32::new(self.pet_size as u32).unwrap(),
                     );
                 }
-                // 派生 UI 关闭，重开时按新缩放
+                // 派生 UI 关闭/重建，重开时按新缩放
                 self.menu = None;
                 self.bubble_hide();
+                self.bubble = BubbleWin::create(el); // 气泡按新字号重建
                 if let Some(i) = &self.input {
                     i.window.set_visible(false);
                     self.input = None;
@@ -1981,6 +1992,34 @@ fn ensure_single_instance() {}
 
 #[cfg(windows)]
 use windows::Win32::Foundation::GetLastError;
+
+/// 色键：渲染中 alpha=0 的像素统一填成这个颜色，
+/// 配合 WS_EX_LAYERED + LWA_COLORKEY 实现"视觉透明 + 点击穿透"。
+/// 注意：美术素材里不要出现 RGB(254,1,254)。
+pub const COLORKEY: u32 = 0xFFFE01FE;
+
+#[cfg(windows)]
+fn hwnd_of(window: &Window) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
+#[cfg(windows)]
+unsafe fn enable_colorkey(hwnd: isize) -> bool {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetWindowLongPtrW, SetLayeredWindowAttributes, SetWindowLongPtrW, GWL_EXSTYLE,
+        LWA_COLORKEY, WS_EX_LAYERED,
+    };
+    use windows::Win32::Foundation::COLORREF;
+    let h = HWND(hwnd as *mut core::ffi::c_void);
+    let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+    SetWindowLongPtrW(h, GWL_EXSTYLE, ex | (WS_EX_LAYERED.0 as isize));
+    SetLayeredWindowAttributes(h, COLORREF(COLORKEY), 0, LWA_COLORKEY).is_ok()
+}
 
 fn main() {
     std::panic::set_hook(Box::new(|info| {
