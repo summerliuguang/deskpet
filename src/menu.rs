@@ -4,7 +4,7 @@
 
 use crate::text::{Rgb, TEXT};
 use crate::{MonRect, SbSurface};
-use std::{num::NonZeroU32, sync::Arc};
+use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event::{ElementState, MouseButton, WindowEvent},
@@ -80,6 +80,7 @@ pub struct MenuWin {
     hover: Option<usize>,
     pressed: Option<usize>,
     cursor: (f64, f64),
+    opened_at: Instant,
 }
 
 fn page_from_id(id: &str) -> Option<Page> {
@@ -136,6 +137,7 @@ impl MenuWin {
             hover: None,
             pressed: None,
             cursor: (0.0, 0.0),
+            opened_at: Instant::now(),
         })
     }
 
@@ -155,6 +157,11 @@ impl MenuWin {
         y = y.max(mon.y + 4);
         self.window.set_outer_position(PhysicalPosition::new(x, y));
         self.window.set_visible(true);
+        // 关键：弹出时光标可能悬在某个条目上但没有产生移动事件，
+        // 用全局光标换算窗口本地坐标，立即初始化命中状态
+        self.cursor = ((at.0 - x) as f64, (at.1 - y) as f64);
+        self.hover = self.row_at(self.cursor.1).filter(|r| self.entries.get(*r).map(|e| e.id.is_some()).unwrap_or(false));
+        self.opened_at = Instant::now();
         self.draw();
         self
     }
@@ -209,7 +216,8 @@ impl MenuWin {
                 MenuOutcome::None
             }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                self.pressed = self.hover;
+                // 按光标当前位置重算命中行，避免悬停状态过期
+                self.pressed = self.row_at(self.cursor.1);
                 if self.pressed.is_some() {
                     self.window.request_redraw();
                 }
@@ -243,7 +251,14 @@ impl MenuWin {
                     None => MenuOutcome::None, // 点在分隔线/空白上，不关闭
                 }
             }
-            WindowEvent::CursorLeft { .. } => MenuOutcome::Close,
+            WindowEvent::CursorLeft { .. } => {
+                // 刚弹出时的瞬时 MouseLeave 不可信
+                if self.opened_at.elapsed() > Duration::from_millis(250) {
+                    MenuOutcome::Close
+                } else {
+                    MenuOutcome::None
+                }
+            }
             WindowEvent::CloseRequested => MenuOutcome::Close,
             _ => MenuOutcome::None,
         }
