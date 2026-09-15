@@ -17,6 +17,7 @@ use deskpet::{
     bubble::BubbleWin,
     config::{Config, Settings},
     inputbox::{InputAction, InputBox},
+    sprite_model::SpriteModel,
     menu::{Entry, MenuOutcome, MenuWin, Page},
     model::{make_model, model_names, PetModel, PetState, Pose},
     todo::{TodoAction, TodoWin},
@@ -35,8 +36,6 @@ use winit::{
 const PET_SIZE: i32 = 64;
 const WALK_STEP: i32 = 4;
 const CLIMB_STEP: i32 = 2;
-const WALK_FRAME_MS: u64 = 180;
-const IDLE_FRAME_MS: u64 = 600;
 const DRAG_FRAME_MS: u64 = 140;
 const THROWN_FRAME_MS: u64 = 16;
 const DRAG_START_MS: u64 = 260;
@@ -63,6 +62,13 @@ struct PressInfo {
     moved: bool,
 }
 
+/// 模型来源
+#[derive(Clone)]
+pub enum ModelSource {
+    Builtin(usize),
+    Sprite(std::path::PathBuf),
+}
+
 struct App {
     proxy: PetEventProxy,
     window: Option<Arc<Window>>,
@@ -78,6 +84,8 @@ struct App {
     settings: Settings,
     model: Box<dyn PetModel>,
     model_kind: usize,
+    /// 模型注册表：(显示名, 来源)
+    models: Vec<(String, ModelSource)>,
 
     state: PetState,
     tick: u32,
@@ -136,6 +144,7 @@ impl App {
             settings,
             model: make_model(0),
             model_kind: 0,
+            models: Vec::new(),
             state: PetState::Idle,
             tick: 0,
             state_len: 60,
@@ -435,14 +444,8 @@ impl App {
     }
 
     fn frame_duration(&self) -> Duration {
-        match self.state {
-            PetState::Walk | PetState::Climb => Duration::from_millis(WALK_FRAME_MS),
-            PetState::Dragged => Duration::from_millis(DRAG_FRAME_MS),
-            PetState::Thrown => Duration::from_millis(THROWN_FRAME_MS),
-            PetState::Groom | PetState::Eat => Duration::from_millis(200),
-            PetState::Stretch => Duration::from_millis(400),
-            _ => Duration::from_millis(IDLE_FRAME_MS),
-        }
+        // 帧序列模型用自己的 fps，内置模型按状态节拍
+        Duration::from_millis(self.model.frame_ms(&self.state))
     }
 
     fn resolve_mon(&mut self) {
@@ -819,6 +822,33 @@ impl App {
         self.bubble_show("右键菜单只在 Windows 上有喵");
     }
 
+    /// 切换到注册表第 i 个模型
+    fn switch_model(&mut self, i: usize) {
+        let Some((name, source)) = self.models.get(i).map(|(n, s)| (n.clone(), s.clone())) else {
+            return;
+        };
+        match source {
+            ModelSource::Builtin(kind) => {
+                self.model_kind = i;
+                self.model = make_model(kind);
+            }
+            ModelSource::Sprite(path) => match SpriteModel::load(path) {
+                Some(m) => {
+                    self.model = Box::new(m);
+                    self.model_kind = i;
+                }
+                None => {
+                    self.bubble_show("这个模型加载失败了喵");
+                    return;
+                }
+            },
+        }
+        self.bubble_show(&format!("嗨！我是{}～", name));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn root_entries(&self) -> Vec<Entry> {
         let onoff = |on: bool| if on { "开" } else { "关" };
         vec![
@@ -853,12 +883,28 @@ impl App {
         ]
     }
 
+    /// 刷新模型注册表：内置物种 + models/ 目录下的帧序列模型
+    fn refresh_model_registry(&mut self) {
+        self.models.clear();
+        for (i, name) in model_names().into_iter().enumerate() {
+            self.models.push((name, ModelSource::Builtin(i)));
+        }
+        let dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("models")))
+            .unwrap_or_else(|| std::path::PathBuf::from("models"));
+        for (name, path) in deskpet::sprite_model::discover(&dir) {
+            self.models.push((name, ModelSource::Sprite(path)));
+        }
+    }
+
     fn model_entries(&self) -> Vec<Entry> {
         let cur = self.model_kind;
-        let mut v: Vec<Entry> = model_names()
+        let mut v: Vec<Entry> = self
+            .models
             .iter()
             .enumerate()
-            .map(|(i, name)| {
+            .map(|(i, (name, _))| {
                 Entry::stay(
                     &format!("model-{i}"),
                     format!("{} {}", if i == cur { "●" } else { "○" }, name),
@@ -1023,13 +1069,7 @@ impl App {
             other if other.starts_with("model-") => {
                 if let Ok(i) = other.strip_prefix("model-").unwrap().parse::<usize>() {
                     if i != self.model_kind {
-                        self.model_kind = i;
-                        self.model = make_model(i);
-                        let name = self.model.info().name.clone();
-                        self.bubble_show(&format!("嗨！我是{name}～"));
-                        if let Some(w) = &self.window {
-                            w.request_redraw();
-                        }
+                        self.switch_model(i);
                     }
                 }
             }
@@ -1197,6 +1237,7 @@ impl ApplicationHandler<PetEvent> for App {
         self.surface = Some(surface);
         self.window = Some(window.clone());
         self.bubble = BubbleWin::create(el);
+        self.refresh_model_registry();
         dlog(&format!(
             "显示器 {} 块，当前 {}x{}+{}+{}；气泡窗 {}",
             self.mons.len(),
@@ -1496,7 +1537,7 @@ impl ApplicationHandler<PetEvent> for App {
             if now >= t && self.state == PetState::Climb {
                 self.hang_until = None;
                 self.climb_vertical = 1;
-                self.frame_at = Some(now + Duration::from_millis(WALK_FRAME_MS));
+                self.frame_at = Some(now + Duration::from_millis(180));
             }
         }
         // 动画帧到期

@@ -742,7 +742,7 @@ mod tests {
                 Frame::SitA, Frame::SitB, Frame::Stretch, Frame::GroomA, Frame::GroomB,
                 Frame::EatA, Frame::EatB,
             ] {
-                let buf = render_frame(f, (1, -1), &COSTUMES[ci], 0);
+                let buf = render_frame(f, (1, -1), &COSTUMES[ci], 0, Species::Cat);
                 assert_eq!(buf.len(), SPRITE_W * SPRITE_W);
                 assert!(buf.iter().any(|&p| p != 0), "帧不能全透明 {f:?} 皮肤{ci}");
                 assert!(buf.iter().any(|&p| p == COSTUMES[ci].outline), "应有描边 {f:?}");

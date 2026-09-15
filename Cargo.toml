@@ -7,6 +7,7 @@ edition = "2021"
 winit = "0.30"
 softbuffer = "0.4"
 fontdue = "0.9"
+png = "0.17"
 raw-window-handle = "0.6"
 ureq = { version = "2", features = ["json"] }
 rustls = { version = "0.23", features = ["ring"] }

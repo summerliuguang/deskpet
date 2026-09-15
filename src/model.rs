@@ -60,6 +60,11 @@ pub trait PetModel: Send {
     }
     /// 渲染到内部复用缓冲并返回切片（每帧零分配）
     fn render(&mut self, pose: &Pose) -> &[u32];
+    /// 该状态下的动画帧间隔（毫秒）；帧序列模型用自己的 fps
+    fn frame_ms(&self, state: &PetState) -> u64 {
+        let _ = state;
+        600
+    }
     fn set_costume(&mut self, idx: usize);
     fn set_expression(&mut self, idx: usize);
     fn costume(&self) -> usize;
@@ -121,6 +126,17 @@ impl PetModel for PixelPet {
             return &self.rot_buf;
         }
         &self.buf
+    }
+
+    fn frame_ms(&self, state: &PetState) -> u64 {
+        match state {
+            PetState::Walk | PetState::Climb | PetState::Perch => 180,
+            PetState::Dragged => 140,
+            PetState::Thrown => 16,
+            PetState::Groom | PetState::Eat => 200,
+            PetState::Stretch => 400,
+            _ => 600,
+        }
     }
 
     fn set_costume(&mut self, idx: usize) {

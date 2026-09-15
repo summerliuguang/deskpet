@@ -5,6 +5,7 @@ pub mod config;
 pub mod input;
 pub mod menu;
 pub mod model;
+pub mod sprite_model;
 pub mod sprites;
 pub mod text;
 pub mod todo;
