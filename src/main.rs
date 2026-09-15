@@ -617,6 +617,7 @@ impl App {
             if moved_px > 24 {
                 self.bubble_show("呼…安全着陆！");
             }
+            self.save_session();
             if let Some(w) = &self.window {
                 w.request_redraw();
             }
@@ -764,13 +765,8 @@ impl App {
                 };
                 let client = self.client.clone();
                 let proxy = self.proxy.clone();
-                let voice = self.settings.voice;
                 std::thread::spawn(move || {
                     let r = client.chat(&cfg, &model, &h);
-                    if let (Ok(reply), true) = (&r, voice) {
-                        // 语音在请求线程播，避免 ChatReply 里重复
-                        tts::speak(&client, &cfg, true, reply);
-                    }
                     let _ = proxy.send_event(PetEvent::ChatReply(r));
                 });
             }
@@ -806,6 +802,7 @@ impl App {
         if self.menu.take().is_some() {
             return;
         }
+        self.refresh_model_registry(); // models/ 新增的模型免重启出现
         let pages = vec![
             (Page::Root, self.root_entries()),
             (Page::Fun, self.fun_entries()),
@@ -974,7 +971,10 @@ impl App {
 
     fn menu_action(&mut self, id: &str, el: &ActiveEventLoop) {
         match id {
-            "quit" | "tray-quit" => el.exit(),
+            "quit" | "tray-quit" => {
+                self.save_session();
+                el.exit();
+            }
             "pet-chat" | "tray-chat" => self.ensure_input(el),
             "pet-todo" => self.ensure_todo(el),
             "pet-feed" => self.feed(),
@@ -1096,6 +1096,18 @@ impl App {
         }
     }
 
+    /// 退出/换模型/拖动结束时的会话保存：开关 + 位置 + 模型选择
+    fn save_session(&mut self) {
+        self.persist_toggles();
+        let mut pairs: Vec<(String, toml::Value)> = Vec::new();
+        if !self.hidden {
+            pairs.push(("pos_x".into(), toml::Value::Integer(self.pos.0 as i64)));
+            pairs.push(("pos_y".into(), toml::Value::Integer(self.pos.1 as i64)));
+        }
+        pairs.push(("model_kind".into(), toml::Value::Integer(self.model_kind as i64)));
+        deskpet::config::persist_settings(&pairs);
+    }
+
     fn persist_toggles(&self) {
         let st = &self.settings;
         deskpet::config::persist_settings(&[
@@ -1207,10 +1219,19 @@ impl ApplicationHandler<PetEvent> for App {
             }
         }
 
-        self.pos = (
-            (self.mon.x + self.mon.w - self.pet_size - 48).max(self.mon.x),
-            (self.mon_bottom() - 96).max(self.mon.y),
-        );
+        // 恢复上次位置（有记录且在当前显示器范围内）
+        if let (Some(px), Some(py)) = (self.settings.pos_x, self.settings.pos_y) {
+            let (px, py) = (px as i32, py as i32);
+            if self.mon.contains_point(px, py) {
+                self.pos = (px, py);
+            }
+        }
+        if self.pos.1 + self.pet_size > self.mon.y + self.mon.h {
+            self.pos = (
+                (self.mon.x + self.mon.w - self.pet_size - 48).max(self.mon.x),
+                (self.mon_bottom() - 96).max(self.mon.y),
+            );
+        }
         window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
 
         let ctx = match softbuffer::Context::new(window.clone()) {
@@ -1245,6 +1266,12 @@ impl ApplicationHandler<PetEvent> for App {
         self.pet_size = self.model.size().0 as i32;
         self.bubble = BubbleWin::create(el);
         self.refresh_model_registry();
+        if let Some(kind) = self.settings.model_kind {
+            if kind != 0 && kind < self.models.len() {
+                self.model_kind = kind;
+                self.switch_model(kind);
+            }
+        }
         dlog(&format!(
             "显示器 {} 块，当前 {}x{}+{}+{}；气泡窗 {}",
             self.mons.len(),
@@ -1403,8 +1430,39 @@ impl ApplicationHandler<PetEvent> for App {
                     }
                 }
             }
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
+                // 拖到不同缩放的显示器：按新缩放重设宠物窗口
+                deskpet::set_ui_scale(scale_factor);
+                self.pet_size = self.model.size().0 as i32;
+                let _ = inner_size_writer.request_inner_size(PhysicalSize::new(
+                    self.pet_size as u32,
+                    self.pet_size as u32,
+                ));
+                if let Some(surface) = &mut self.surface {
+                    let _ = surface.resize(
+                        NonZeroU32::new(self.pet_size as u32).unwrap(),
+                        NonZeroU32::new(self.pet_size as u32).unwrap(),
+                    );
+                }
+                // 派生 UI 关闭，重开时按新缩放
+                self.menu = None;
+                self.bubble_hide();
+                if let Some(i) = &self.input {
+                    i.window.set_visible(false);
+                    self.input = None;
+                }
+                if let Some(t) = &self.todo {
+                    t.window.set_visible(false);
+                    self.todo = None;
+                }
+                window.request_redraw();
+                dlog(&format!("缩放变化 → {scale_factor:.2}"));
+            }
             WindowEvent::Ime(Ime::Enabled) | WindowEvent::Ime(Ime::Disabled) => {}
-            WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::CloseRequested => {
+                self.save_session();
+                el.exit();
+            }
             _ => {}
         }
     }
@@ -1461,6 +1519,11 @@ impl ApplicationHandler<PetEvent> for App {
                     Ok(t) => t,
                     Err(e) => format!("出错了：{e}"),
                 };
+                // 全屏时不出声（游戏/视频不被打断）
+                if !self.hidden {
+                    let cfg = self.cfg.clone();
+                    tts::speak(&self.client, &cfg, self.settings.voice, &reply);
+                }
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: reply.clone(), image: None });
                 self.trim_history();
@@ -1895,11 +1958,36 @@ fn dlog(msg: &str) {
     }
 }
 
+/// 单实例互斥：已有桌宠运行时直接退出（防止双开出现两只猫/资源冲突）
+#[cfg(windows)]
+fn ensure_single_instance() {
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
+    use windows::Win32::System::Threading::CreateMutexW;
+    unsafe {
+        let name: Vec<u16> = "Global\\deskpet-rs-single-instance\0"
+            .encode_utf16()
+            .collect();
+        let _ = CreateMutexW(None, false, PCWSTR(name.as_ptr()));
+        if GetLastError() == ERROR_ALREADY_EXISTS {
+            dlog("已有桌宠实例在运行，本次启动退出");
+            std::process::exit(0);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn ensure_single_instance() {}
+
+#[cfg(windows)]
+use windows::Win32::Foundation::GetLastError;
+
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         dlog(&format!("PANIC: {info}"));
     }));
     dlog("启动：v0.3.2");
+    ensure_single_instance();
     let text = deskpet::config::load_text();
     let cfg = text.as_deref().map(deskpet::config::parse_config).unwrap_or_default();
     let settings = deskpet::config::parse_settings(text.as_deref().unwrap_or(""));

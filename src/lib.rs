@@ -36,6 +36,10 @@ pub struct MonRect {
 }
 
 impl MonRect {
+    pub fn contains_point(&self, px: i32, py: i32) -> bool {
+        px >= self.x && px < self.x + self.w && py >= self.y && py < self.y + self.h
+    }
+
     pub fn contains_center(&self, px: i32, py: i32, size: i32) -> bool {
         let (cx, cy) = (px + size / 2, py + size / 2);
         cx >= self.x && cx < self.x + self.w && cy >= self.y && cy < self.y + self.h

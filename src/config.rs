@@ -43,6 +43,11 @@ impl Default for Config {
 #[derive(Debug, Clone)]
 pub struct Settings {
     pub voice: bool,
+    /// 上次退出时的宠物位置（恢复用）
+    pub pos_x: Option<i64>,
+    pub pos_y: Option<i64>,
+    /// 上次选中的模型（注册表下标）
+    pub model_kind: Option<usize>,
     pub drink_minutes: u64,
     pub sit_minutes: u64,
     pub keyboard_link: bool,
@@ -56,6 +61,9 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             voice: true,
+            pos_x: None,
+            pos_y: None,
+            model_kind: None,
             drink_minutes: 45,
             sit_minutes: 90,
             keyboard_link: true,
@@ -74,7 +82,11 @@ impl Settings {
         };
         let b = |k: &str, d: bool| v.get(k).and_then(|x| x.as_bool()).unwrap_or(d);
         let u = |k: &str, d: u64| v.get(k).and_then(|x| x.as_integer()).map(|x| x as u64).unwrap_or(d);
+        let i64opt = |k: &str| v.get(k).and_then(|x| x.as_integer()).map(|x| x as i64);
         Self {
+            pos_x: i64opt("pos_x"),
+            pos_y: i64opt("pos_y"),
+            model_kind: v.get("model_kind").and_then(|x| x.as_integer()).map(|x| x as usize),
             voice: b("voice", true),
             drink_minutes: u("drink_minutes", 45),
             sit_minutes: u("sit_minutes", 90),
