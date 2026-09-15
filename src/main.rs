@@ -33,7 +33,6 @@ use winit::{
     window::{Window, WindowId, WindowLevel},
 };
 
-const PET_SIZE: i32 = 64;
 const WALK_STEP: i32 = 4;
 const CLIMB_STEP: i32 = 2;
 const DRAG_FRAME_MS: u64 = 140;
@@ -84,6 +83,8 @@ struct App {
     settings: Settings,
     model: Box<dyn PetModel>,
     model_kind: usize,
+    /// 宠物窗口边长（物理像素，来自 model.size()）
+    pet_size: i32,
     /// 模型注册表：(显示名, 来源)
     models: Vec<(String, ModelSource)>,
 
@@ -144,6 +145,7 @@ impl App {
             settings,
             model: make_model(0),
             model_kind: 0,
+            pet_size: 64,
             models: Vec::new(),
             state: PetState::Idle,
             tick: 0,
@@ -195,7 +197,7 @@ impl App {
     }
 
     fn mon_bottom(&self) -> i32 {
-        self.mon.y + self.mon.h - PET_SIZE
+        self.mon.y + self.mon.h - self.pet_size
     }
 
     // ---------- 状态机 ----------
@@ -264,7 +266,7 @@ impl App {
         #[cfg(windows)]
         {
             if let Some((mx, my)) = cursor_pos() {
-                let (cx, cy) = (self.pos.0 + PET_SIZE / 2, self.pos.1 + PET_SIZE / 2);
+                let (cx, cy) = (self.pos.0 + self.pet_size / 2, self.pos.1 + self.pet_size / 2);
                 let (dx, dy) = (mx - cx, my - cy);
                 let gx = if dx > 28 { 1 } else if dx < -28 { -1 } else { 0 };
                 let gy = if dy > 28 { 1 } else if dy < -28 { -1 } else { 0 };
@@ -281,7 +283,7 @@ impl App {
         {
             #[cfg(windows)]
             if let Some((mx, _)) = cursor_pos() {
-                let target = mx - PET_SIZE / 2;
+                let target = mx - self.pet_size / 2;
                 let dx = target - self.pos.0;
                 if dx.abs() > 32 {
                     if self.state == PetState::Idle {
@@ -317,8 +319,8 @@ impl App {
                         self.pos.0 += WALK_STEP;
                         self.enter_climb(-1);
                     }
-                } else if self.pos.0 > self.mon.x + self.mon.w - PET_SIZE {
-                    self.pos.0 = self.mon.x + self.mon.w - PET_SIZE;
+                } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                    self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
                     self.dir = -1;
                     if self.mon.h >= 240 && self.rand() % 10 < 4 {
                         self.pos.0 -= WALK_STEP;
@@ -408,8 +410,8 @@ impl App {
                     self.pos.0 = self.mon.x;
                     vx = -vx * 0.7;
                 }
-                if self.pos.0 > self.mon.x + self.mon.w - PET_SIZE {
-                    self.pos.0 = self.mon.x + self.mon.w - PET_SIZE;
+                if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                    self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
                     vx = -vx * 0.7;
                 }
                 if self.pos.1 < self.mon.y {
@@ -449,7 +451,7 @@ impl App {
     }
 
     fn resolve_mon(&mut self) {
-        if let Some(m) = self.mons.iter().find(|m| m.contains_center(self.pos.0, self.pos.1, PET_SIZE)) {
+        if let Some(m) = self.mons.iter().find(|m| m.contains_center(self.pos.0, self.pos.1, self.pet_size)) {
             if m.x != self.mon.x || m.y != self.mon.y {
                 self.mon = *m;
             }
@@ -494,7 +496,7 @@ impl App {
         let secs = (2 + text.chars().count() as u64 / 6).min(8);
         let above = self.pos.1 > self.mon.y + 90;
         if let Some(b) = &mut self.bubble {
-            b.show(text, self.pos, self.mon, above);
+            b.show(text, self.pos, self.pet_size, self.mon, above);
             self.bubble_until = Some(Instant::now() + Duration::from_secs(secs.max(2)));
         }
     }
@@ -506,7 +508,7 @@ impl App {
         }
         let above = self.pos.1 > self.mon.y + 90;
         if let Some(b) = &mut self.bubble {
-            b.show(text, self.pos, self.mon, above);
+            b.show(text, self.pos, self.pet_size, self.mon, above);
         }
         self.bubble_until = None;
     }
@@ -708,12 +710,12 @@ impl App {
     /// 打开/重新贴位悬浮输入框
     fn ensure_input(&mut self, el: &ActiveEventLoop) {
         if let Some(i) = &mut self.input {
-            i.open(self.pos, self.mon);
+            i.open(self.pos, self.pet_size, self.mon);
             return;
         }
         let ph = format!("和{}说点什么…", self.cfg.pet_name);
         if let Some(mut i) = InputBox::create(el, ph) {
-            i.open(self.pos, self.mon);
+            i.open(self.pos, self.pet_size, self.mon);
             self.input = Some(i);
         }
     }
@@ -1156,8 +1158,12 @@ impl ApplicationHandler<PetEvent> for App {
         if self.window.is_some() {
             return;
         }
+        // UI 缩放：取主显示器 scale factor（100%/125%/150%/200%…）
+        deskpet::set_ui_scale(el.primary_monitor().map(|m| m.scale_factor()).unwrap_or(1.0));
+        dlog(&format!("UI 缩放：{:.2}", deskpet::ui_scale()));
+
         let mut attrs = Window::default_attributes()
-            .with_inner_size(PhysicalSize::new(PET_SIZE as u32, PET_SIZE as u32))
+            .with_inner_size(PhysicalSize::new(self.pet_size as u32, self.pet_size as u32))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -1202,8 +1208,8 @@ impl ApplicationHandler<PetEvent> for App {
         }
 
         self.pos = (
-            (self.mon.x + self.mon.w - PET_SIZE - 48).max(self.mon.x),
-            (self.mon.y + self.mon.h - PET_SIZE - 96).max(self.mon.y),
+            (self.mon.x + self.mon.w - self.pet_size - 48).max(self.mon.x),
+            (self.mon_bottom() - 96).max(self.mon.y),
         );
         window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
 
@@ -1226,8 +1232,8 @@ impl ApplicationHandler<PetEvent> for App {
         dlog("渲染就绪（softbuffer）");
         if surface
             .resize(
-                NonZeroU32::new(PET_SIZE as u32).unwrap(),
-                NonZeroU32::new(PET_SIZE as u32).unwrap(),
+                NonZeroU32::new(self.pet_size as u32).unwrap(),
+                NonZeroU32::new(self.pet_size as u32).unwrap(),
             )
             .is_err()
         {
@@ -1236,6 +1242,7 @@ impl ApplicationHandler<PetEvent> for App {
         }
         self.surface = Some(surface);
         self.window = Some(window.clone());
+        self.pet_size = self.model.size().0 as i32;
         self.bubble = BubbleWin::create(el);
         self.refresh_model_registry();
         dlog(&format!(
@@ -1374,7 +1381,7 @@ impl ApplicationHandler<PetEvent> for App {
                                 .fold((i32::MAX, i32::MAX), |a, m| (a.0.min(m.x), a.1.min(m.y)));
                             let (max_x, max_y) = self.mons.iter().fold(
                                 (i32::MIN, i32::MIN),
-                                |a, m| (a.0.max(m.x + m.w - PET_SIZE), a.1.max(m.y + m.h - PET_SIZE)),
+                                |a, m| (a.0.max(m.x + m.w - self.pet_size), a.1.max(m.y + m.h - self.pet_size)),
                             );
                             self.pos = (nx.clamp(min_x, max_x), ny.clamp(min_y, max_y));
                             window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
@@ -1558,7 +1565,7 @@ impl ApplicationHandler<PetEvent> for App {
                     let dots = format!("{}{}", "·".repeat(self.think_frame as usize + 1), " ".repeat(2 - self.think_frame as usize));
                     if let Some(b) = &mut self.bubble {
                         let above = self.pos.1 > self.mon.y + 90;
-                        b.show(&dots, self.pos, self.mon, above);
+                        b.show(&dots, self.pos, self.pet_size, self.mon, above);
                     }
                 }
             }
@@ -1610,8 +1617,8 @@ impl App {
         let i = (self.rand() % cands.len() as u64) as usize;
         let (hwnd, rect) = cands[i];
         let addr = hwnd.0 as isize;
-        let w = (rect.right - rect.left).max(PET_SIZE + 8);
-        let off = 4 + (self.rand() % ((w - PET_SIZE - 8).max(1) as u64)) as i32;
+        let w = (rect.right - rect.left).max(self.pet_size + 8);
+        let off = 4 + (self.rand() % ((w - self.pet_size - 8).max(1) as u64)) as i32;
         self.perch = Some((addr, off, 40)); // ~7 秒
         self.enter_pose(PetState::Perch, u32::MAX, Some("爬上来啦～"));
         self.perch_follow();
@@ -1634,7 +1641,7 @@ impl App {
                 return;
             }
             self.pos.0 = (rect.left + *off).max(self.mon.x);
-            self.pos.1 = (rect.top - PET_SIZE + 3).max(self.mon.y);
+            self.pos.1 = (rect.top - self.pet_size + 3).max(self.mon.y);
         }
     }
 }

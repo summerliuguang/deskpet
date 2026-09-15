@@ -1,7 +1,7 @@
 //! 气泡对话框：独立的无边框透明小窗，点击穿透（set_cursor_hittest(false)），
 //! 显示在猫头顶，到时自动消失。纯软件渲染中文文本。
 
-use crate::text::{Rgb, TEXT};
+use crate::text::{base_px, ui, Rgb, TEXT};
 use crate::SbSurface;
 use std::{num::NonZeroU32, sync::Arc};
 use winit::{
@@ -18,6 +18,7 @@ pub struct BubbleWin {
     pub window: Arc<Window>,
     surface: SbSurface,
     lines: Vec<String>,
+    px: i32,
     size: (i32, i32),
     above: bool,
 }
@@ -45,22 +46,37 @@ impl BubbleWin {
         let ctx = softbuffer::Context::new(window.clone()).ok()?;
         let mut surface = softbuffer::Surface::new(&ctx, window.clone()).ok()?;
         surface
-            .resize(NonZeroU32::new(60).unwrap(), NonZeroU32::new(40).unwrap())
+            .resize(NonZeroU32::new(ui(60) as u32).unwrap(), NonZeroU32::new(ui(40) as u32).unwrap())
             .ok()?;
-        Some(Self { window, surface, lines: Vec::new(), size: (60, 40), above: true })
+        Some(Self {
+            window,
+            surface,
+            lines: Vec::new(),
+            size: (ui(60), ui(40)),
+            above: true,
+            px: base_px(),
+        })
     }
 
     /// 显示气泡。above=true 时尾巴朝下（气泡在猫头顶）。
-    pub fn show(&mut self, text: &str, pet_pos: (i32, i32), mon: crate::MonRect, above: bool) {
-        let layout = TEXT.layout(text, 200);
-        let w = (layout.width + 24).clamp(56, 240);
-        let h = layout.height + 12 + 6;
+    pub fn show(
+        &mut self,
+        text: &str,
+        pet_pos: (i32, i32),
+        pet_size: i32,
+        mon: crate::MonRect,
+        above: bool,
+    ) {
+        let px = self.px;
+        let layout = TEXT.layout(text, (200.0 * crate::ui_scale()) as i32, px);
+        let w = (layout.width + ui(24)).clamp(ui(56), ui(240));
+        let h = layout.height + ui(12) + ui(6);
         self.size = (w, h);
         self.lines = layout.lines;
         self.above = above;
         let _ = self.window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
-        let bx = (pet_pos.0 + 32 - w / 2).clamp(mon.x + 4, (mon.x + mon.w - w - 4).max(mon.x + 4));
-        let by = if above { pet_pos.1 - h - 8 } else { pet_pos.1 + 64 + 8 };
+        let bx = (pet_pos.0 + pet_size / 2 - w / 2).clamp(mon.x + 4, (mon.x + mon.w - w - 4).max(mon.x + 4));
+        let by = if above { pet_pos.1 - h - 8 } else { pet_pos.1 + pet_size + 8 };
         self.window.set_outer_position(PhysicalPosition::new(bx, by.max(mon.y + 2)));
         if self.surface.resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap()).is_ok() {
             self.draw();
@@ -73,6 +89,7 @@ impl BubbleWin {
     }
 
     fn draw(&mut self) {
+        let px = self.px;
         let (w, h) = self.size;
         let mut buf = vec![0u32; (w * h) as usize];
         let tail_y0 = if self.above { h - 7 } else { 0 };
@@ -119,7 +136,7 @@ impl BubbleWin {
         }
         // 文本（避开边框和尾巴区）
         let clip = (3, body_y0 + 3, w - 4, body_y1 - 4);
-        TEXT.draw_clipped(&mut buf, w, h, clip, 12, body_y0 + 6, &self.lines, INK, false);
+        TEXT.draw_clipped(&mut buf, w, h, clip, px, 12, body_y0 + 6, &self.lines, INK, false);
         if let Ok(mut b) = self.surface.buffer_mut() {
             for (dst, src) in b.iter_mut().zip(buf.iter()) {
                 *dst = *src;

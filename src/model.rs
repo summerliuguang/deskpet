@@ -74,6 +74,8 @@ pub trait PetModel: Send {
 /// 内置像素宠物（猫/柴犬/兔兔/企鹅共用骨骼，不同外形）
 pub struct PixelPet {
     species: sprites::Species,
+    /// 精灵放大倍数（逻辑 16px × 倍数 = 窗口边长；随 UI 缩放取整数倍保证锐利）
+    sprite_scale: i32,
     costume: usize,
     expr: usize,
     info: ModelInfo,
@@ -86,12 +88,15 @@ pub struct PixelPet {
 impl PixelPet {
     pub fn new(kind: usize) -> Self {
         let species = sprites::species_of(kind);
+        // 像素画只在整数倍缩放下锐利：逻辑 16px × 4 倍基准，随 UI 缩放取最近整数倍
+        let sprite_scale = (4.0 * crate::ui_scale()).round().max(1.0) as i32;
         Self {
             species,
+            sprite_scale,
             costume: 0,
             expr: 0,
-            buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
-            rot_buf: Vec::with_capacity(sprites::SPRITE_W * sprites::SPRITE_W),
+            buf: Vec::with_capacity((16 * sprite_scale) as usize * (16 * sprite_scale) as usize),
+            rot_buf: Vec::with_capacity((16 * sprite_scale) as usize * (16 * sprite_scale) as usize),
             info: ModelInfo {
                 name: sprites::SPECIES_NAMES[kind.min(sprites::SPECIES_NAMES.len() - 1)].into(),
                 costumes: sprites::palettes(species).iter().map(|c| c.name.to_string()).collect(),
@@ -116,13 +121,26 @@ impl PetModel for PixelPet {
         &self.info
     }
 
+    fn size(&self) -> (u32, u32) {
+        let side = (16 * self.sprite_scale) as u32;
+        (side, side)
+    }
+
     fn render(&mut self, pose: &Pose) -> &[u32] {
         let pals = sprites::palettes(self.species);
         let palette = &pals[self.costume.min(pals.len() - 1)];
         let frame = sprites::pose_to_frame(pose);
-        sprites::render_frame_into(&mut self.buf, frame, pose.gaze, palette, pose.expr, self.species);
+        sprites::render_frame_into(
+            &mut self.buf,
+            frame,
+            pose.gaze,
+            palette,
+            pose.expr,
+            self.species,
+            self.sprite_scale,
+        );
         if pose.state == PetState::Climb && pose.aux != 0 {
-            sprites::rotate90_into(&mut self.rot_buf, &self.buf, pose.aux < 0);
+            sprites::rotate90_into(&mut self.rot_buf, &self.buf, pose.aux < 0, (16 * self.sprite_scale) as usize);
             return &self.rot_buf;
         }
         &self.buf

@@ -1,7 +1,7 @@
 //! 悬浮输入框：贴在宠物下方的小输入条（像素风），回车发送、Esc 关闭。
 //! 拖图片进来直接触发识别。回复以气泡形式出现在猫头顶（见 main.rs / bubble.rs）。
 
-use crate::text::{Rgb, TEXT};
+use crate::text::{base_px, ui, Rgb, TEXT};
 use crate::SbSurface;
 use std::{num::NonZeroU32, sync::Arc};
 use winit::{
@@ -32,6 +32,8 @@ pub struct InputBox {
     preedit: Option<String>,
     pub pending: bool,
     placeholder: String,
+    w: i32,
+    h: i32,
 }
 
 impl InputBox {
@@ -52,16 +54,26 @@ impl InputBox {
         window.set_ime_allowed(true);
         let ctx = softbuffer::Context::new(window.clone()).ok()?;
         let mut surface = softbuffer::Surface::new(&ctx, window.clone()).ok()?;
+        let (w, h) = (ui(W), ui(H));
         surface
-            .resize(NonZeroU32::new(W as u32).unwrap(), NonZeroU32::new(H as u32).unwrap())
+            .resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap())
             .ok()?;
-        Some(Self { window, surface, input: String::new(), preedit: None, pending: false, placeholder })
+        Some(Self {
+            window,
+            surface,
+            input: String::new(),
+            preedit: None,
+            pending: false,
+            placeholder,
+            w,
+            h,
+        })
     }
 
     /// 贴着宠物下方打开；贴不下（猫在屏幕底缘）就放猫上方
-    pub fn open(&mut self, pet_pos: (i32, i32), mon: crate::MonRect) {
-        let x = (pet_pos.0 + 32 - W / 2).clamp(mon.x + 4, (mon.x + mon.w - W - 4).max(mon.x + 4));
-        let below = pet_pos.1 + 64 + 6;
+    pub fn open(&mut self, pet_pos: (i32, i32), pet_size: i32, mon: crate::MonRect) {
+        let x = (pet_pos.0 + pet_size / 2 - W / 2).clamp(mon.x + 4, (mon.x + mon.w - W - 4).max(mon.x + 4));
+        let below = pet_pos.1 + pet_size + 6;
         let y = if below + H <= mon.y + mon.h - 2 {
             below
         } else {
@@ -170,12 +182,13 @@ impl InputBox {
     }
 
     pub fn draw(&mut self) {
-        let mut buf = vec![BG; (W * H) as usize];
+        let px = base_px();
+        let mut buf = vec![BG; (self.w * self.h) as usize];
         // 像素风边框
-        for y in 0..H {
-            for x in 0..W {
-                let edge = x < 2 || x >= W - 2 || y < 2 || y >= H - 2;
-                buf[(y * W + x) as usize] = if edge { BORDER } else { BG };
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let edge = x < 2 || x >= self.w - 2 || y < 2 || y >= self.h - 2;
+                buf[(y * self.w + x) as usize] = if edge { BORDER } else { BG };
             }
         }
         let shown: String = if self.pending {
@@ -198,24 +211,24 @@ impl InputBox {
         // 超宽只显示尾部
         let full_count = shown.chars().count();
         let mut clipped = shown.clone();
-        while TEXT.text_width(&clipped) > W - 20 && !clipped.is_empty() {
+        while TEXT.text_width(&clipped, px) > self.w - 20 && !clipped.is_empty() {
             let mut it = clipped.chars();
             it.next();
             clipped = it.as_str().to_string();
         }
         let hidden_head = full_count - clipped.chars().count();
         TEXT.draw_clipped(
-            &mut buf, W, H,
-            (5, 4, W - 5, H - 4),
-            8, 4, &[clipped], color, false,
+            &mut buf, self.w, self.h,
+            (5, 4, self.w - 5, self.h - 4),
+            px, 8, 4, &[clipped], color, false,
         );
         // 光标（非思考中才显示）
         if !self.pending {
             let shown_full: String = format!("{}{}", self.input, self.preedit.as_deref().unwrap_or(""));
             let vis: String = shown_full.chars().skip(hidden_head).collect();
-            let caret_x = (8 + TEXT.text_width(&vis)).min(W - 10);
-            for y in 7..H - 7 {
-                buf[(y * W + caret_x) as usize] = 0xFF3A3644;
+            let caret_x = (8 + TEXT.text_width(&vis, px)).min(self.w - 10);
+            for y in 7..self.h - 7 {
+                buf[(y * self.w + caret_x) as usize] = 0xFF3A3644;
             }
         }
         if let Ok(mut b) = self.surface.buffer_mut() {

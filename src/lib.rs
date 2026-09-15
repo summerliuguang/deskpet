@@ -42,6 +42,22 @@ impl MonRect {
     }
 }
 
+/// UI 缩放系数（主显示器 scale_factor，resumed 时设置；未设置 = 1.0）
+static UI_SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+
+pub fn set_ui_scale(s: f64) {
+    let _ = UI_SCALE.set(s.max(0.5));
+}
+
+pub fn ui_scale() -> f64 {
+    *UI_SCALE.get().unwrap_or(&1.0)
+}
+
+/// 逻辑尺寸 → 物理像素
+pub fn ui(v: i32) -> i32 {
+    (v as f64 * ui_scale()).round() as i32
+}
+
 /// 毫秒级 UNIX 时间戳（供节流/计时的小工具）
 pub fn now_ms() -> u64 {
     std::time::SystemTime::now()

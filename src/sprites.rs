@@ -11,7 +11,6 @@
 pub const SPRITE_W: usize = 64;
 
 const LOGICAL: i32 = 16;
-const SCALE: i32 = (SPRITE_W as i32) / LOGICAL;
 
 const DARK: u32 = 0xFF3A3026;
 const PINK: u32 = 0xFFF08A8A;
@@ -104,18 +103,20 @@ pub enum Frame {
 
 struct Canvas {
     px: Vec<u32>,
+    scale: i32,
 }
 
 impl Canvas {
-    /// 画一个逻辑像素（自动放大）
+    /// 画一个逻辑像素（按 scale 整数倍放大，保证像素画锐利）
     fn dot(&mut self, x: i32, y: i32, color: u32) {
         if x < 0 || y < 0 || x >= LOGICAL || y >= LOGICAL {
             return;
         }
-        let (bx, by) = (x * SCALE, y * SCALE);
-        for dy in 0..SCALE {
-            for dx in 0..SCALE {
-                let idx = ((by + dy) as usize) * SPRITE_W + (bx + dx) as usize;
+        let sc = self.scale;
+        let (bx, by) = (x * sc, y * sc);
+        for dy in 0..sc {
+            for dx in 0..sc {
+                let idx = ((by + dy) as usize) * (LOGICAL * sc) as usize + (bx + dx) as usize;
                 self.px[idx] = color;
             }
         }
@@ -155,7 +156,8 @@ impl Canvas {
         if x < 0 || y < 0 || x >= LOGICAL || y >= LOGICAL {
             return false;
         }
-        let idx = ((y * SCALE) as usize) * SPRITE_W + (x * SCALE) as usize;
+        let sc = self.scale;
+        let idx = ((y * sc) as usize) * (LOGICAL * sc) as usize + (x * sc) as usize;
         self.px[idx] != 0
     }
 }
@@ -477,7 +479,7 @@ pub fn render_frame(
     sp: Species,
 ) -> Vec<u32> {
     let mut out = Vec::new();
-    render_frame_into(&mut out, frame, gaze, p, expr, sp);
+    render_frame_into(&mut out, frame, gaze, p, expr, sp, 4);
     out
 }
 
@@ -489,11 +491,13 @@ pub fn render_frame_into(
     p: &Palette,
     expr: usize,
     sp: Species,
+    scale: i32,
 ) {
     let (body, outline, eye) = (p.body, p.outline, p.eye);
-    let mut c = Canvas { px: std::mem::take(out) };
+    let mut c = Canvas { px: std::mem::take(out), scale };
+    let side = (LOGICAL * scale) as usize;
     c.px.clear();
-    c.px.resize(SPRITE_W * SPRITE_W, 0);
+    c.px.resize(side * side, 0);
     if sp == Species::Penguin {
         penguin_frame(&mut c, frame, expr, p);
         c.outline_pass(outline);
@@ -649,8 +653,7 @@ pub fn render_frame_into(
 }
 
 /// 将 64x64 缓冲旋转 90 度：ccw=false 顺时针（左墙头朝上），true 逆时针（右墙）
-pub fn rotate90_into(out: &mut Vec<u32>, src: &[u32], ccw: bool) {
-    let n = SPRITE_W;
+pub fn rotate90_into(out: &mut Vec<u32>, src: &[u32], ccw: bool, n: usize) {
     out.clear();
     out.resize(n * n, 0);
     for y in 0..n {
@@ -727,7 +730,7 @@ mod tests {
                 Frame::EatA, Frame::EatB,
             ] {
                 let buf = render_frame(f, (1, -1), p, 0, sp);
-                assert_eq!(buf.len(), SPRITE_W * SPRITE_W);
+                assert_eq!(buf.len(), SPRITE_W * SPRITE_W, "默认 scale=4");
                 assert!(buf.iter().any(|&px| px != 0), "帧不能全透明 {f:?} 物种{si}");
             }
         }

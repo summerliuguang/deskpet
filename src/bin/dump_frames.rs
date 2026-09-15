@@ -52,7 +52,7 @@ fn main() {
         }
     }
     deskpet::text::TEXT.draw(
-        &mut buf, w as i32, h as i32, 8, 6,
+        &mut buf, w as i32, h as i32, 12, 8, 6,
         &["喵呜！你好呀～".to_string(), "今天也要加油鸭 Hello!".to_string()],
         (45, 42, 38), false,
     );

@@ -2,7 +2,7 @@
 //! 支持二级页面（互动/换装/表情/设置），悬停 select 高亮、按下 pressed 变色，
 //! 鼠标移出菜单即关闭。切换开关类条目 (stay) 点击后菜单保持打开并刷新标签。
 
-use crate::text::{Rgb, TEXT};
+use crate::text::{base_px, ui, Rgb, TEXT};
 use crate::{MonRect, SbSurface};
 use std::{num::NonZeroU32, sync::Arc, time::{Duration, Instant}};
 use winit::{
@@ -17,6 +17,7 @@ const ITEM_H: i32 = 28;
 const SEP_H: i32 = 10;
 const PAD: i32 = 8;
 const RADIUS: i32 = 10;
+// 以上为逻辑值，create 时按 UI 缩放生成实际值
 
 const BG: u32 = 0xCD101014; // 半透明黑底
 const BORDER: u32 = 0x38FFFFFF;
@@ -72,6 +73,13 @@ pub enum MenuOutcome {
 pub struct MenuWin {
     pub window: Arc<Window>,
     surface: SbSurface,
+    /// 缩放后的实际尺寸/度量
+    w: i32,
+    item_h: i32,
+    sep_h: i32,
+    pad: i32,
+    radius: i32,
+    px: i32,
     pages: Vec<(Page, Vec<Entry>)>,
     page: Page,
     entries: Vec<Entry>,
@@ -106,7 +114,10 @@ impl MenuWin {
             .find(|(p, _)| *p == start)
             .map(|(_, e)| e.clone())
             .unwrap_or_default();
-        let total_h = Self::height_of(&entries);
+        let (w, item_h, sep_h, pad, radius, px) = (
+            ui(W), ui(ITEM_H), ui(SEP_H), ui(PAD), ui(RADIUS), base_px(),
+        );
+        let total_h = Self::height_of_scaled(&entries, item_h, pad, sep_h);
         let mut attrs = Window::default_attributes()
             .with_inner_size(PhysicalSize::new(W as u32, total_h as u32))
             .with_decorations(false)
@@ -129,6 +140,12 @@ impl MenuWin {
         Some(Self {
             window,
             surface,
+            w,
+            item_h,
+            sep_h,
+            pad,
+            radius,
+            px,
             pages,
             page: start,
             entries,
@@ -141,10 +158,10 @@ impl MenuWin {
         })
     }
 
-    fn height_of(entries: &[Entry]) -> i32 {
-        PAD * 2
-            + entries.iter().filter(|e| e.id.is_some()).count() as i32 * ITEM_H
-            + entries.iter().filter(|e| e.id.is_none()).count() as i32 * SEP_H
+    fn height_of_scaled(entries: &[Entry], item_h: i32, pad: i32, sep_h: i32) -> i32 {
+        pad * 2
+            + entries.iter().filter(|e| e.id.is_some()).count() as i32 * item_h
+            + entries.iter().filter(|e| e.id.is_none()).count() as i32 * sep_h
     }
 
     /// 在光标处弹出；靠近屏幕下缘时改为向上一贴
@@ -180,11 +197,11 @@ impl MenuWin {
     }
 
     fn relayout(&mut self) {
-        self.total_h = Self::height_of(&self.entries);
+        self.total_h = Self::height_of_scaled(&self.entries, self.item_h, self.pad, self.sep_h);
         self.hover = None;
         self.pressed = None;
         let _ = self.window.request_inner_size(PhysicalSize::new(
-            W as u32,
+            self.w as u32,
             self.total_h.max(1) as u32,
         ));
         let _ = self.surface.resize(
@@ -274,7 +291,7 @@ impl MenuWin {
 
     pub fn draw(&mut self) {
         let total_h = self.total_h;
-        let r = RADIUS;
+        let r = self.radius;
         // 圆角矩形内含判定
         let inside = |px: i32, py: i32| -> bool {
             if px < 0 || py < 0 || px >= W || py >= total_h {
@@ -295,7 +312,7 @@ impl MenuWin {
         };
         let mut buf = vec![0u32; (W * total_h) as usize];
         for y in 0..total_h {
-            for x in 0..W {
+            for x in 0..self.w {
                 if inside(x, y) {
                     buf[(y * W + x) as usize] = BG;
                 }
@@ -304,7 +321,7 @@ impl MenuWin {
         // 1px 内描边（有外侧邻接的内部像素）
         let mut border = Vec::new();
         for y in 0..total_h {
-            for x in 0..W {
+            for x in 0..self.w {
                 if !inside(x, y) {
                     continue;
                 }
@@ -322,21 +339,21 @@ impl MenuWin {
 
         // 行布局 + select/pressed 底色 + 文本
         self.rows.clear();
-        let lh = TEXT.line_height();
-        let mut y = PAD;
+        let lh = TEXT.line_height(self.px);
+        let mut y = self.pad;
         for (idx, entry) in self.entries.iter().enumerate() {
             match entry.id {
                 None => {
-                    let ly = y + SEP_H / 2;
-                    for x in 12..W - 12 {
+                    let ly = y + self.sep_h / 2;
+                    for x in 12..self.w - 12 {
                         if inside(x, ly) {
                             buf[(ly * W + x) as usize] = 0x24FFFFFF;
                         }
                     }
-                    y += SEP_H;
+                    y += self.sep_h;
                 }
                 Some(_) => {
-                    let (y0, y1) = (y, y + ITEM_H);
+                    let (y0, y1) = (y, y + self.item_h);
                     let row = self.rows.len();
                     self.rows.push((y0, y1, idx));
                     let selected = self.hover == Some(row);
@@ -364,15 +381,16 @@ impl MenuWin {
                         entry.label.clone()
                     };
                     TEXT.draw_clipped(
-                        &mut buf, W, total_h,
-                        (6, y0, W - 6, y1),
-                        12,
+                        &mut buf, self.w, total_h,
+                        (ui(6), y0, self.w - ui(6), y1),
+                        self.px,
+                        ui(12),
                         y0 + (ITEM_H - lh) / 2,
                         &[label],
                         color,
                         false,
                     );
-                    y += ITEM_H;
+                    y += self.item_h;
                 }
             }
         }
