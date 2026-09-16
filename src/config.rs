@@ -120,40 +120,36 @@ pub fn load() -> Option<Config> {
     load_text().map(|text| parse_config(&text))
 }
 
-/// 解析 AI 配置（解析失败回退全部默认值）
+/// 解析 AI 配置（解析失败/缺字段回退默认值；默认值只在 Config::default() 一处）
 pub fn parse_config(text: &str) -> Config {
-    let v = match text.parse::<toml::Value>() {
-        Ok(v) => v,
-        Err(_) => return Config::default(),
+    let Ok(v) = text.parse::<toml::Value>() else {
+        return Config::default();
     };
     let s = |k: &str| v.get(k).and_then(|x| x.as_str()).map(|x| x.to_string());
     let mut cfg = Config {
-        base_url: s("base_url").unwrap_or_else(|| "https://your-gateway.example/v1".into()),
         api_key: s("api_key")
             .filter(|k| !k.is_empty())
             .or_else(|| std::env::var("DESKPET_API_KEY").ok())
             .unwrap_or_default(),
-        // 默认聊天走网关上的免费模型（OpenRouter/NIM :free）
-        model: s("model")
-            .filter(|x| !x.is_empty())
-            .unwrap_or_else(|| "nvidia/nemotron-3-super-120b-a12b:free".into()),
-        vision_model: s("vision_model")
-            .filter(|x| !x.is_empty())
-            // 免费模型不支持图片输入，视觉默认走便宜的付费模型（仅拖图时触发）
-            .or_else(|| Some("deepseek-flash".into())),
-        system_prompt: s("system_prompt").unwrap_or_else(|| {
-            "你是趴在主人 Windows 桌面上的小猫，名字叫团子。用中文回复，简短可爱，\
-             不超过 60 字，可以偶尔用颜文字。"
-                .into()
-        }),
-        pet_name: {
-            let name = s("pet_name").unwrap_or_else(|| "团子".into());
-            if name.trim().is_empty() { "团子".into() } else { name }
-        },
-        tts_voice: s("tts_voice").unwrap_or_else(|| "mimo_default".into()),
+        ..Config::default()
     };
-    if cfg.system_prompt.trim().is_empty() {
-        cfg.system_prompt = Config::default().system_prompt;
+    if let Some(bu) = s("base_url").filter(|x| !x.is_empty()) {
+        cfg.base_url = bu;
+    }
+    if let Some(m) = s("model").filter(|x| !x.is_empty()) {
+        cfg.model = m;
+    }
+    if let Some(vm) = s("vision_model").filter(|x| !x.is_empty()) {
+        cfg.vision_model = Some(vm);
+    }
+    if let Some(sp) = s("system_prompt").filter(|x| !x.trim().is_empty()) {
+        cfg.system_prompt = sp;
+    }
+    if let Some(name) = s("pet_name").filter(|x| !x.trim().is_empty()) {
+        cfg.pet_name = name;
+    }
+    if let Some(voice) = s("tts_voice").filter(|x| !x.is_empty()) {
+        cfg.tts_voice = voice;
     }
     cfg
 }
@@ -201,6 +197,21 @@ mod tests {
         assert_eq!(c.api_key, "sk-lg-test");
         assert_eq!(c.pet_name, "橘子");
         assert!(c.ai_ready());
+    }
+
+    /// 回归：base_url 空值回退默认、非空覆盖默认（曾在此处遗漏覆盖分支）
+    #[test]
+    fn parse_config_base_url_fallback_and_override() {
+        assert_eq!(parse_config("").base_url, Config::default().base_url);
+        let c = parse_config("base_url = \"https://example.invalid/v1\"");
+        assert_eq!(c.base_url, "https://example.invalid/v1");
+    }
+
+    /// vision_model 空值与其他字段一致：回退默认（免费模型无视觉，默认走付费视觉模型）
+    #[test]
+    fn parse_config_empty_vision_model_falls_back() {
+        assert_eq!(parse_config("").vision_model, Some("deepseek-flash".into()));
+        assert_eq!(parse_config("vision_model = \"\"").vision_model, Some("deepseek-flash".into()));
     }
 
     #[test]

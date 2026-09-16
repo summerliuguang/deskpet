@@ -25,9 +25,11 @@ pub struct BubbleWin {
 
 impl BubbleWin {
     pub fn create(el: &ActiveEventLoop) -> Option<Self> {
+        // 初始物理尺寸（show 时按内容重设；窗口与 surface 保持一致）
+        let (iw, ih) = (ui(60), ui(40));
         #[allow(unused_mut)] // windows 下会追加 with_skip_taskbar
         let mut attrs = Window::default_attributes()
-            .with_inner_size(PhysicalSize::new(60u32, 40u32))
+            .with_inner_size(PhysicalSize::new(iw as u32, ih as u32))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -46,7 +48,7 @@ impl BubbleWin {
         let ctx = softbuffer::Context::new(window.clone()).ok()?;
         let mut surface = softbuffer::Surface::new(&ctx, window.clone()).ok()?;
         surface
-            .resize(NonZeroU32::new(ui(60) as u32).unwrap(), NonZeroU32::new(ui(40) as u32).unwrap())
+            .resize(NonZeroU32::new(iw as u32).unwrap(), NonZeroU32::new(ih as u32).unwrap())
             .ok()?;
         Some(Self {
             window,

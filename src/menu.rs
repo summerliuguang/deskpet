@@ -119,7 +119,7 @@ impl MenuWin {
         );
         let total_h = Self::height_of_scaled(&entries, item_h, pad, sep_h);
         let mut attrs = Window::default_attributes()
-            .with_inner_size(PhysicalSize::new(W as u32, total_h as u32))
+            .with_inner_size(PhysicalSize::new(w as u32, total_h as u32))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -135,7 +135,7 @@ impl MenuWin {
         let ctx = softbuffer::Context::new(window.clone()).ok()?;
         let mut surface = softbuffer::Surface::new(&ctx, window.clone()).ok()?;
         surface
-            .resize(NonZeroU32::new(W as u32).unwrap(), NonZeroU32::new(total_h as u32).unwrap())
+            .resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(total_h as u32).unwrap())
             .ok()?;
         Some(Self {
             window,
@@ -166,7 +166,7 @@ impl MenuWin {
 
     /// 在光标处弹出；靠近屏幕下缘时改为向上一贴
     pub fn open(mut self, at: (i32, i32), mon: MonRect) -> Self {
-        let x = at.0.clamp(mon.x + 4, (mon.x + mon.w - W - 4).max(mon.x + 4));
+        let x = at.0.clamp(mon.x + 4, (mon.x + mon.w - self.w - 4).max(mon.x + 4));
         let mut y = at.1;
         if y + self.total_h > mon.y + mon.h - 4 {
             y = at.1 - self.total_h;
@@ -205,7 +205,7 @@ impl MenuWin {
             self.total_h.max(1) as u32,
         ));
         let _ = self.surface.resize(
-            NonZeroU32::new(W as u32).unwrap(),
+            NonZeroU32::new(self.w as u32).unwrap(),
             NonZeroU32::new(self.total_h.max(1) as u32).unwrap(),
         );
         self.draw();
@@ -292,13 +292,13 @@ impl MenuWin {
     pub fn draw(&mut self) {
         let total_h = self.total_h;
         let r = self.radius;
-        // 圆角矩形内含判定
+        // 圆角矩形内含判定（所有尺寸用物理宽 self.w，缩放下与缓冲一致）
         let inside = |px: i32, py: i32| -> bool {
-            if px < 0 || py < 0 || px >= W || py >= total_h {
+            if px < 0 || py < 0 || px >= self.w || py >= total_h {
                 return false;
             }
             let (lx, ly) = (px, py);
-            let (rx, ry) = (W - 1 - lx, total_h - 1 - ly);
+            let (rx, ry) = (self.w - 1 - lx, total_h - 1 - ly);
             for (cx, cy) in [(r, r), (rx, ry), (r, ry), (rx, r)] {
                 if cx < r && cy < r {
                     let dx = cx - r;
@@ -310,11 +310,11 @@ impl MenuWin {
             }
             true
         };
-        let mut buf = vec![0u32; (W * total_h) as usize];
+        let mut buf = vec![0u32; (self.w * total_h) as usize];
         for y in 0..total_h {
             for x in 0..self.w {
                 if inside(x, y) {
-                    buf[(y * W + x) as usize] = BG;
+                    buf[(y * self.w + x) as usize] = BG;
                 }
             }
         }
@@ -334,7 +334,7 @@ impl MenuWin {
             }
         }
         for (x, y) in border {
-            buf[(y * W + x) as usize] = BORDER;
+            buf[(y * self.w + x) as usize] = BORDER;
         }
 
         // 行布局 + select/pressed 底色 + 文本
@@ -345,9 +345,9 @@ impl MenuWin {
             match entry.id {
                 None => {
                     let ly = y + self.sep_h / 2;
-                    for x in 12..self.w - 12 {
+                    for x in ui(12)..self.w - ui(12) {
                         if inside(x, ly) {
-                            buf[(ly * W + x) as usize] = 0x24FFFFFF;
+                            buf[(ly * self.w + x) as usize] = 0x24FFFFFF;
                         }
                     }
                     y += self.sep_h;
@@ -362,12 +362,12 @@ impl MenuWin {
                         let bg = if pressed { PRESSED_BG } else { HOVER_BG };
                         let pa = (bg >> 24) & 0xFF;
                         for yy in y0.max(r)..(y1 - 1).min(total_h - r) {
-                            for x in 4..W - 4 {
-                                let px = buf[(yy * W + x) as usize];
+                            for x in ui(4)..self.w - ui(4) {
+                                let px = buf[(yy * self.w + x) as usize];
                                 let mixch = |sc: u32, dc: u32| -> u32 {
                                     (sc * pa + dc * (255 - pa)) / 255
                                 };
-                                buf[(yy * W + x) as usize] = 0xFF000000
+                                buf[(yy * self.w + x) as usize] = 0xFF000000
                                     | (mixch((bg >> 16) & 0xFF, (px >> 16) & 0xFF) << 16)
                                     | (mixch((bg >> 8) & 0xFF, (px >> 8) & 0xFF) << 8)
                                     | mixch(bg & 0xFF, px & 0xFF);
@@ -385,7 +385,7 @@ impl MenuWin {
                         (ui(6), y0, self.w - ui(6), y1),
                         self.px,
                         ui(12),
-                        y0 + (ITEM_H - lh) / 2,
+                        y0 + (self.item_h - lh) / 2,
                         &[label],
                         color,
                         false,
@@ -400,5 +400,33 @@ impl MenuWin {
             }
             let _ = b.present();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 守护测试：draw 里缓冲行宽必须用物理宽 self.w（=ui(W)），
+    /// 曾因误用逻辑常量 W(188) 在 UI 缩放 >100% 时越界写 panic。
+    /// 扫描源码禁止按常量 W 计算索引/判边界/分配缓冲的写法
+    /// （模式用 format! 构造，避免匹配到本测试自身源码）。
+    #[test]
+    fn draw_indexes_use_scaled_width_not_logical_constant() {
+        let src = include_str!("menu.rs");
+        let idx = format!("* {W} +");
+        let bound = format!(">= {W}");
+        let alloc = format!("({W} * total_h)");
+        assert!(!src.contains(idx.as_str()), "缓冲索引禁止用逻辑常量 W，应统一 self.w");
+        assert!(!src.contains(bound.as_str()), "边界判定禁止用逻辑常量 W，应统一 self.w");
+        assert!(!src.contains(alloc.as_str()), "缓冲分配禁止用逻辑常量 W");
+    }
+
+    /// 缩放后的行高计算：条目与分隔线分开计数，分隔线不占条目高度
+    #[test]
+    fn height_counts_items_and_separators() {
+        let entries = vec![Entry::item("a", "甲"), Entry::sep(), Entry::item("b", "乙")];
+        let h = MenuWin::height_of_scaled(&entries, 28, 8, 10);
+        assert_eq!(h, 8 * 2 + 28 * 2 + 10);
     }
 }

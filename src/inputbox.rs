@@ -38,8 +38,10 @@ pub struct InputBox {
 
 impl InputBox {
     pub fn create(el: &ActiveEventLoop, placeholder: String) -> Option<Self> {
+        // 窗口与 surface 必须同用物理尺寸（逻辑值经 ui() 缩放），否则高 DPI 下右侧被裁
+        let (w, h) = (ui(W), ui(H));
         let mut attrs = Window::default_attributes()
-            .with_inner_size(PhysicalSize::new(W as u32, H as u32))
+            .with_inner_size(PhysicalSize::new(w as u32, h as u32))
             .with_decorations(false)
             .with_transparent(true)
             .with_resizable(false)
@@ -54,7 +56,6 @@ impl InputBox {
         window.set_ime_allowed(true);
         let ctx = softbuffer::Context::new(window.clone()).ok()?;
         let mut surface = softbuffer::Surface::new(&ctx, window.clone()).ok()?;
-        let (w, h) = (ui(W), ui(H));
         surface
             .resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap())
             .ok()?;
@@ -72,12 +73,13 @@ impl InputBox {
 
     /// 贴着宠物下方打开；贴不下（猫在屏幕底缘）就放猫上方
     pub fn open(&mut self, pet_pos: (i32, i32), pet_size: i32, mon: crate::MonRect) {
-        let x = (pet_pos.0 + pet_size / 2 - W / 2).clamp(mon.x + 4, (mon.x + mon.w - W - 4).max(mon.x + 4));
-        let below = pet_pos.1 + pet_size + 6;
-        let y = if below + H <= mon.y + mon.h - 2 {
+        let x = (pet_pos.0 + pet_size / 2 - self.w / 2)
+            .clamp(mon.x + 4, (mon.x + mon.w - self.w - 4).max(mon.x + 4));
+        let below = pet_pos.1 + pet_size + ui(6);
+        let y = if below + self.h <= mon.y + mon.h - ui(2) {
             below
         } else {
-            (pet_pos.1 - H - 6).max(mon.y + 2)
+            (pet_pos.1 - self.h - ui(6)).max(mon.y + ui(2))
         };
         self.window.set_outer_position(PhysicalPosition::new(x, y));
         self.window.set_visible(true);
@@ -184,10 +186,11 @@ impl InputBox {
     pub fn draw(&mut self) {
         let px = base_px();
         let mut buf = vec![BG; (self.w * self.h) as usize];
-        // 像素风边框
+        // 像素风边框（厚度随缩放）
+        let b = ui(2).max(1);
         for y in 0..self.h {
             for x in 0..self.w {
-                let edge = x < 2 || x >= self.w - 2 || y < 2 || y >= self.h - 2;
+                let edge = x < b || x >= self.w - b || y < b || y >= self.h - b;
                 buf[(y * self.w + x) as usize] = if edge { BORDER } else { BG };
             }
         }
@@ -208,10 +211,11 @@ impl InputBox {
         } else {
             shown
         };
+        let pad_l = ui(8);
         // 超宽只显示尾部
         let full_count = shown.chars().count();
         let mut clipped = shown.clone();
-        while TEXT.text_width(&clipped, px) > self.w - 20 && !clipped.is_empty() {
+        while TEXT.text_width(&clipped, px) > self.w - ui(20) && !clipped.is_empty() {
             let mut it = clipped.chars();
             it.next();
             clipped = it.as_str().to_string();
@@ -219,15 +223,15 @@ impl InputBox {
         let hidden_head = full_count - clipped.chars().count();
         TEXT.draw_clipped(
             &mut buf, self.w, self.h,
-            (5, 4, self.w - 5, self.h - 4),
-            px, 8, 4, &[clipped], color, false,
+            (ui(5), ui(4), self.w - ui(5), self.h - ui(4)),
+            px, pad_l, ui(4), &[clipped], color, false,
         );
         // 光标（非思考中才显示）
         if !self.pending {
             let shown_full: String = format!("{}{}", self.input, self.preedit.as_deref().unwrap_or(""));
             let vis: String = shown_full.chars().skip(hidden_head).collect();
-            let caret_x = (8 + TEXT.text_width(&vis, px)).min(self.w - 10);
-            for y in 7..self.h - 7 {
+            let caret_x = (pad_l + TEXT.text_width(&vis, px)).min(self.w - ui(10));
+            for y in ui(7)..self.h - ui(7) {
                 buf[(y * self.w + caret_x) as usize] = 0xFF3A3644;
             }
         }
