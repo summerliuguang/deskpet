@@ -118,6 +118,7 @@ impl MenuWin {
             ui(W), ui(ITEM_H), ui(SEP_H), ui(PAD), ui(RADIUS), base_px(),
         );
         let total_h = Self::height_of_scaled(&entries, item_h, pad, sep_h);
+        #[allow(unused_mut)] // windows 下会追加 with_skip_taskbar
         let mut attrs = Window::default_attributes()
             .with_inner_size(PhysicalSize::new(w as u32, total_h as u32))
             .with_decorations(false)

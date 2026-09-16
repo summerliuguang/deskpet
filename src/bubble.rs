@@ -21,6 +21,7 @@ pub struct BubbleWin {
     px: i32,
     size: (i32, i32),
     above: bool,
+    visible: bool,
 }
 
 impl BubbleWin {
@@ -57,7 +58,23 @@ impl BubbleWin {
             size: (ui(60), ui(40)),
             above: true,
             px: base_px(),
+            visible: false,
         })
+    }
+
+    /// 贴着宠物定位（气泡中心对准宠物中心，上下贴边翻转）；show/reposition 共用
+    fn place(
+        &self,
+        pet_pos: (i32, i32),
+        pet_size: i32,
+        mon: crate::MonRect,
+        above: bool,
+    ) -> (i32, i32) {
+        let (w, h) = self.size;
+        let bx = (pet_pos.0 + pet_size / 2 - w / 2)
+            .clamp(mon.x + 4, (mon.x + mon.w - w - 4).max(mon.x + 4));
+        let by = if above { pet_pos.1 - h - 8 } else { pet_pos.1 + pet_size + 8 };
+        (bx, by.max(mon.y + 2))
     }
 
     /// 显示气泡。above=true 时尾巴朝下（气泡在猫头顶）。
@@ -77,16 +94,27 @@ impl BubbleWin {
         self.lines = layout.lines;
         self.above = above;
         let _ = self.window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
-        let bx = (pet_pos.0 + pet_size / 2 - w / 2).clamp(mon.x + 4, (mon.x + mon.w - w - 4).max(mon.x + 4));
-        let by = if above { pet_pos.1 - h - 8 } else { pet_pos.1 + pet_size + 8 };
-        self.window.set_outer_position(PhysicalPosition::new(bx, by.max(mon.y + 2)));
+        let (bx, by) = self.place(pet_pos, pet_size, mon, above);
+        self.window.set_outer_position(PhysicalPosition::new(bx, by));
         if self.surface.resize(NonZeroU32::new(w as u32).unwrap(), NonZeroU32::new(h as u32).unwrap()).is_ok() {
             self.draw();
         }
+        self.visible = true;
         self.window.set_visible(true);
     }
 
+    /// 宠物移动时保持气泡贴在宠物旁（不重绘，只挪位置）
+    pub fn reposition(&mut self, pet_pos: (i32, i32), pet_size: i32, mon: crate::MonRect, above: bool) {
+        let (bx, by) = self.place(pet_pos, pet_size, mon, above);
+        self.window.set_outer_position(PhysicalPosition::new(bx, by));
+    }
+
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
+
     pub fn hide(&mut self) {
+        self.visible = false;
         self.window.set_visible(false);
     }
 

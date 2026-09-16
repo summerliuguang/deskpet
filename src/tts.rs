@@ -1,6 +1,7 @@
 //! TTS 播放：合成走 LiteGate MiMo（ai::Client::tts），播放走 Win32 PlaySound。
 //! 合成在独立线程，PlaySound SND_ASYNC 不阻塞事件循环。
 
+#[cfg(windows)]
 use std::sync::atomic::{AtomicU64, Ordering};
 
 /// 上次合成开始时间（毫秒时间戳）：1.5 秒内不重复合成。
@@ -8,7 +9,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 #[cfg(windows)]
 static LAST_START_MS: AtomicU64 = AtomicU64::new(0);
 
-#[cfg(windows)]
 /// enabled = 运行时开关（右键菜单"语音：开/关"）；cfg.voice 只作为启动初值
 #[cfg(windows)]
 pub fn speak(client: &crate::ai::Client, cfg: &crate::config::Config, enabled: bool, text: &str) {

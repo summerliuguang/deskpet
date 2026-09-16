@@ -277,8 +277,11 @@ impl App {
     }
 
     fn advance(&mut self, window: &Window) {
-        // 跟随鼠标模式：朝光标水平位置走，靠近后坐下看
+        // 右键菜单打开期间暂停位移（菜单不跟着跑），动画帧照常
+        let ui_modal = self.menu.is_some();
+        // 跟随鼠标模式：朝光标水平位置走，靠近后坐下看（输入框打开时不追，安静陪着打字）
         if self.settings.follow_mouse
+            && self.input.is_none()
             && matches!(self.state, PetState::Idle | PetState::Walk)
         {
             #[cfg(windows)]
@@ -302,33 +305,38 @@ impl App {
                     if self.idle_cycles >= 2 {
                         self.state = PetState::Sleep;
                         self.tick = 0;
-                    } else {
+                    } else if self.input.is_none() {
+                        // 输入框打开时不去散步：原地待着陪主人打字（睡意也不累积）
                         self.idle_cycles += 1;
                         self.enter_walk();
+                    } else {
+                        self.tick = 0;
                     }
                 }
             }
             PetState::Walk => {
                 self.tick += 1;
-                self.pos.0 += self.dir * WALK_STEP;
-                if self.pos.0 < self.mon.x {
-                    self.pos.0 = self.mon.x;
-                    self.dir = 1;
-                    // 撞左墙：概率爬墙
-                    if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                        self.pos.0 += WALK_STEP;
-                        self.enter_climb(-1);
+                if !ui_modal {
+                    self.pos.0 += self.dir * WALK_STEP;
+                    if self.pos.0 < self.mon.x {
+                        self.pos.0 = self.mon.x;
+                        self.dir = 1;
+                        // 撞左墙：概率爬墙
+                        if self.mon.h >= 240 && self.rand() % 10 < 4 {
+                            self.pos.0 += WALK_STEP;
+                            self.enter_climb(-1);
+                        }
+                    } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                        self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
+                        self.dir = -1;
+                        if self.mon.h >= 240 && self.rand() % 10 < 4 {
+                            self.pos.0 -= WALK_STEP;
+                            self.enter_climb(1);
+                        }
                     }
-                } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
-                    self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
-                    self.dir = -1;
-                    if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                        self.pos.0 -= WALK_STEP;
-                        self.enter_climb(1);
-                    }
+                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                 }
-                window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                if self.state == PetState::Walk && self.tick >= self.state_len {
+                if self.tick >= self.state_len {
                     // 随机休息姿势：坐 / 伸懒腰 / 舔毛，小概率去趴窗
                     let roll = self.rand() % 100;
                     if roll <= 9 && self.mon.h >= 240 {
@@ -355,7 +363,9 @@ impl App {
             PetState::Perch => {
                 self.tick += 1;
                 #[cfg(windows)]
-                self.perch_follow();
+                if !ui_modal {
+                    self.perch_follow();
+                }
                 let done = self.perch.as_ref().map(|(_, _, t)| *t == 0).unwrap_or(true);
                 if done {
                     // 从窗口上跳下来
@@ -366,7 +376,9 @@ impl App {
                     self.frame_at = Some(Instant::now() + Duration::from_millis(THROWN_FRAME_MS));
                     return;
                 }
-                window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                if !ui_modal {
+                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                }
             }
             PetState::Climb => {
                 self.tick += 1;
@@ -397,39 +409,43 @@ impl App {
                         self.enter_idle();
                     }
                 }
-                window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                if !ui_modal {
+                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                }
             }
             PetState::Thrown => {
                 let dt = THROWN_FRAME_MS as f32;
                 let (mut vx, mut vy) = self.thrown_vel;
-                self.pos.0 += (vx * dt) as i32;
-                self.pos.1 += (vy * dt) as i32;
-                vy += GRAVITY * dt;
                 let mut landed = false;
-                if self.pos.0 < self.mon.x {
-                    self.pos.0 = self.mon.x;
-                    vx = -vx * 0.7;
-                }
-                if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
-                    self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
-                    vx = -vx * 0.7;
-                }
-                if self.pos.1 < self.mon.y {
-                    self.pos.1 = self.mon.y;
-                    vy = 0.0;
-                }
-                let floor = self.mon_bottom();
-                if self.pos.1 >= floor {
-                    self.pos.1 = floor;
-                    vy = -vy * 0.45;
-                    vx *= 0.75;
-                    if vy.abs() < 0.06 {
-                        vy = 0.0;
-                        landed = true;
+                if !ui_modal {
+                    self.pos.0 += (vx * dt) as i32;
+                    self.pos.1 += (vy * dt) as i32;
+                    vy += GRAVITY * dt;
+                    if self.pos.0 < self.mon.x {
+                        self.pos.0 = self.mon.x;
+                        vx = -vx * 0.7;
                     }
+                    if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                        self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
+                        vx = -vx * 0.7;
+                    }
+                    if self.pos.1 < self.mon.y {
+                        self.pos.1 = self.mon.y;
+                        vy = 0.0;
+                    }
+                    let floor = self.mon_bottom();
+                    if self.pos.1 >= floor {
+                        self.pos.1 = floor;
+                        vy = -vy * 0.45;
+                        vx *= 0.75;
+                        if vy.abs() < 0.06 {
+                            vy = 0.0;
+                            landed = true;
+                        }
+                    }
+                    self.thrown_vel = (vx, vy);
+                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                 }
-                self.thrown_vel = (vx, vy);
-                window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                 if landed {
                     self.resolve_mon();
                     self.enter_idle();
@@ -441,6 +457,15 @@ impl App {
             }
             PetState::Dragged | PetState::Patted | PetState::Shocked | PetState::Sleep => {
                 self.tick += 1;
+            }
+        }
+        // 气泡跟随宠物移动（散步/爬墙/飞出/趴窗跟随），不再留在原地指向旧位置
+        if self.bubble_until.is_some() || self.chat_pending {
+            let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
+            if let Some(b) = &mut self.bubble {
+                if b.is_visible() {
+                    b.reposition(pp, ps, mon, above);
+                }
             }
         }
     }
@@ -489,12 +514,17 @@ impl App {
 
     // ---------- 气泡 ----------
 
+    /// 气泡放头顶还是脚下：宠物贴近屏幕上缘时放脚下
+    fn bubble_above(&self) -> bool {
+        self.pos.1 > self.mon.y + 90
+    }
+
     fn bubble_show(&mut self, text: &str) {
         if self.hidden {
             return; // 全屏遮挡期间绝不弹泡（游戏/视频零干扰）
         }
         let secs = (2 + text.chars().count() as u64 / 6).min(8);
-        let above = self.pos.1 > self.mon.y + 90;
+        let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
             b.show(text, self.pos, self.pet_size, self.mon, above);
             self.bubble_until = Some(Instant::now() + Duration::from_secs(secs.max(2)));
@@ -506,7 +536,7 @@ impl App {
         if self.hidden {
             return;
         }
-        let above = self.pos.1 > self.mon.y + 90;
+        let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
             b.show(text, self.pos, self.pet_size, self.mon, above);
         }
@@ -742,8 +772,20 @@ impl App {
         }
     }
 
-    /// 发送一条消息（文本或拖入的图片）：回复以气泡 + 语音呈现
+    /// 发送一条消息（文本或拖入的图片）：回复以气泡 + 语音呈现。
+    /// 上一条还没回复时不并发请求（回复会乱序、思考动画错乱），
+    /// 被拒的文本放回输入框不丢字。
     fn send_chat(&mut self, text: String, image: Option<String>) {
+        if self.chat_pending {
+            self.bubble_show("等我说完这句嘛～");
+            if let Some(i) = &mut self.input {
+                if image.is_none() {
+                    i.input = text;
+                }
+                i.clear_pending();
+            }
+            return;
+        }
         self.chat_history
             .push(ChatMsg { role: Role::User, text, image: image.clone() });
         self.trim_history();
@@ -1179,6 +1221,7 @@ impl ApplicationHandler<PetEvent> for App {
         deskpet::set_ui_scale(el.primary_monitor().map(|m| m.scale_factor()).unwrap_or(1.0));
         dlog(&format!("UI 缩放：{:.2}", deskpet::ui_scale()));
 
+        #[cfg_attr(not(windows), allow(unused_mut))] // windows 下会追加 with_skip_taskbar
         let mut attrs = Window::default_attributes()
             .with_inner_size(PhysicalSize::new(self.pet_size as u32, self.pet_size as u32))
             .with_decorations(false)
@@ -1637,9 +1680,9 @@ impl ApplicationHandler<PetEvent> for App {
                     self.think_frame = (self.think_frame + 1) % 3;
                     self.think_next = Some(now + Duration::from_millis(350));
                     let dots = format!("{}{}", "·".repeat(self.think_frame as usize + 1), " ".repeat(2 - self.think_frame as usize));
+                    let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
                     if let Some(b) = &mut self.bubble {
-                        let above = self.pos.1 > self.mon.y + 90;
-                        b.show(&dots, self.pos, self.pet_size, self.mon, above);
+                        b.show(&dots, pp, ps, mon, above);
                     }
                 }
             }

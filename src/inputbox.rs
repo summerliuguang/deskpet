@@ -40,6 +40,7 @@ impl InputBox {
     pub fn create(el: &ActiveEventLoop, placeholder: String) -> Option<Self> {
         // 窗口与 surface 必须同用物理尺寸（逻辑值经 ui() 缩放），否则高 DPI 下右侧被裁
         let (w, h) = (ui(W), ui(H));
+        #[allow(unused_mut)] // windows 下会追加 with_skip_taskbar
         let mut attrs = Window::default_attributes()
             .with_inner_size(PhysicalSize::new(w as u32, h as u32))
             .with_decorations(false)

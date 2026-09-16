@@ -754,7 +754,7 @@ mod tests {
 
     #[test]
     fn model_renders_climb_rotated() {
-        use crate::model::{make_model, PetModel};
+        use crate::model::make_model;
         let mut m = make_model(0);
         let base = pose(PetState::Walk, 0);
         // 渲染缓冲是复用的：需要留存的帧先 to_vec
