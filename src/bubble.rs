@@ -3,7 +3,11 @@
 
 use crate::text::{base_px, ui, Rgb, TEXT};
 use crate::SbSurface;
-use std::{num::NonZeroU32, sync::Arc};
+use std::{
+    num::NonZeroU32,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use winit::{
     dpi::{PhysicalPosition, PhysicalSize},
     event_loop::ActiveEventLoop,
@@ -13,6 +17,40 @@ use winit::{
 const INK: Rgb = (45, 42, 38);
 const PAPER: u32 = 0xFFFDF9EE;
 const BORDER: u32 = 0xFF5A5040;
+/// 光标条颜色（与文字同色系，直接预混 ARGB）
+const INK_MIX: u32 = 0xFF2D2A26;
+
+/// 取前 n 个字符（跨行），返回截断后的行集
+fn truncate_lines(lines: &[String], n: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::with_capacity(lines.len());
+    let mut left = n;
+    for line in lines {
+        if left == 0 {
+            break;
+        }
+        let len = line.chars().count();
+        if len <= left {
+            out.push(line.clone());
+            left -= len;
+        } else {
+            out.push(line.chars().take(left).collect());
+            left = 0;
+        }
+    }
+    out
+}
+
+/// 打字机逐字显示状态
+struct Typewriter {
+    /// 全文总字符数（chars 计）
+    full_len: usize,
+    /// 已显示字符数
+    shown: usize,
+    /// 下次推进时刻
+    next_at: Instant,
+}
+
+const TYPE_STEP_MS: u64 = 45;
 
 pub struct BubbleWin {
     pub window: Arc<Window>,
@@ -22,6 +60,8 @@ pub struct BubbleWin {
     size: (i32, i32),
     above: bool,
     visible: bool,
+    /// Some = 打字机逐字显示中（尺寸仍按全文布局，不跳动）
+    typing: Option<Typewriter>,
 }
 
 impl BubbleWin {
@@ -59,6 +99,7 @@ impl BubbleWin {
             above: true,
             px: base_px(),
             visible: false,
+            typing: None,
         })
     }
 
@@ -86,6 +127,30 @@ impl BubbleWin {
         mon: crate::MonRect,
         above: bool,
     ) {
+        self.show_inner(text, pet_pos, pet_size, mon, above, true);
+    }
+
+    /// 即时显示全文（思考泡等动画文本不适合打字机）
+    pub fn show_now(
+        &mut self,
+        text: &str,
+        pet_pos: (i32, i32),
+        pet_size: i32,
+        mon: crate::MonRect,
+        above: bool,
+    ) {
+        self.show_inner(text, pet_pos, pet_size, mon, above, false);
+    }
+
+    fn show_inner(
+        &mut self,
+        text: &str,
+        pet_pos: (i32, i32),
+        pet_size: i32,
+        mon: crate::MonRect,
+        above: bool,
+        typewriter: bool,
+    ) {
         let px = self.px;
         let layout = TEXT.layout(text, (200.0 * crate::ui_scale()) as i32, px);
         let w = (layout.width + ui(24)).clamp(ui(56), ui(240));
@@ -93,6 +158,13 @@ impl BubbleWin {
         self.size = (w, h);
         self.lines = layout.lines;
         self.above = above;
+        // 打字机：尺寸按全文定死，逐字填充；空白文本直接跳过
+        let full_len: usize = self.lines.iter().map(|l| l.chars().count()).sum();
+        self.typing = if typewriter && full_len > 1 {
+            Some(Typewriter { full_len, shown: 1, next_at: Instant::now() + Duration::from_millis(TYPE_STEP_MS) })
+        } else {
+            None
+        };
         let _ = self.window.request_inner_size(PhysicalSize::new(w as u32, h as u32));
         let (bx, by) = self.place(pet_pos, pet_size, mon, above);
         self.window.set_outer_position(PhysicalPosition::new(bx, by));
@@ -101,6 +173,32 @@ impl BubbleWin {
         }
         self.visible = true;
         self.window.set_visible(true);
+    }
+
+    /// 打字机推进一步；返回 true 表示仍在打字中
+    pub fn advance_typing(&mut self) -> bool {
+        let Some(t) = &mut self.typing else { return false };
+        t.shown += 1;
+        t.next_at = Instant::now() + Duration::from_millis(TYPE_STEP_MS);
+        let done = t.shown >= t.full_len;
+        if done {
+            self.typing = None;
+        }
+        self.draw();
+        !done
+    }
+
+    /// 打字中的下一次推进时刻
+    pub fn next_tick_at(&self) -> Option<Instant> {
+        self.typing.as_ref().map(|t| t.next_at)
+    }
+
+    /// 打字机剩余时长（显示到期时间要加上它）
+    pub fn typing_remaining(&self) -> Duration {
+        self.typing
+            .as_ref()
+            .map(|t| Duration::from_millis((t.full_len - t.shown) as u64 * TYPE_STEP_MS))
+            .unwrap_or_default()
     }
 
     /// 宠物移动时保持气泡贴在宠物旁（不重绘，只挪位置）
@@ -115,6 +213,7 @@ impl BubbleWin {
 
     pub fn hide(&mut self) {
         self.visible = false;
+        self.typing = None;
         self.window.set_visible(false);
     }
 
@@ -164,9 +263,27 @@ impl BubbleWin {
                 }
             }
         }
-        // 文本（避开边框和尾巴区）
+        // 文本（避开边框和尾巴区）；打字中只画前 shown 个字符 + 光标条
         let clip = (3, body_y0 + 3, w - 4, body_y1 - 4);
-        TEXT.draw_clipped(&mut buf, w, h, clip, px, 12, body_y0 + 6, &self.lines, INK, false);
+        let shown_lines: Vec<String> = match &self.typing {
+            Some(t) => truncate_lines(&self.lines, t.shown),
+            None => self.lines.clone(),
+        };
+        TEXT.draw_clipped(&mut buf, w, h, clip, px, 12, body_y0 + 6, &shown_lines, INK, false);
+        if self.typing.is_some() {
+            // 光标条：紧跟最后可见字符
+            let last = shown_lines.last().map(|s| s.as_str()).unwrap_or("");
+            let cx = 12 + TEXT.text_width(last, px);
+            let cy = body_y0 + 6 + (shown_lines.len().saturating_sub(1)) as i32 * TEXT.line_height(px);
+            for dy in 0..TEXT.line_height(px) - 2 {
+                for dx in 0..ui(2).max(1) {
+                    let (x, y) = (cx + dx, cy + dy + 1);
+                    if x > 2 && x < w - 3 && y > body_y0 + 2 && y < body_y1 - 3 {
+                        buf[(y * w + x) as usize] = INK_MIX;
+                    }
+                }
+            }
+        }
         if let Ok(mut b) = self.surface.buffer_mut() {
             for (dst, src) in b.iter_mut().zip(buf.iter()) {
                 *dst = *src;

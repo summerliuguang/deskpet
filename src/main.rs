@@ -515,6 +515,7 @@ impl App {
     fn next_wakeup(&self) -> Option<Instant> {
         let now = Instant::now();
         let press_deadline = self.press.map(|p| p.start + Duration::from_millis(DRAG_START_MS));
+        let typing_tick = self.bubble.as_ref().and_then(|b| b.next_tick_at());
         [
             self.frame_at,
             self.bubble_until,
@@ -526,6 +527,7 @@ impl App {
             self.sit_at,
             Some(self.autosave_at),
             self.onboard_at,
+            typing_tick,
             press_deadline,
         ]
         .into_iter()
@@ -555,19 +557,26 @@ impl App {
         let secs = (2 + text.chars().count() as u64 / 6).min(8);
         let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
-            b.show(text, self.pos, self.pet_size, self.mon, above);
-            self.bubble_until = Some(Instant::now() + Duration::from_secs(secs));
+            if self.settings.typewriter {
+                b.show(text, self.pos, self.pet_size, self.mon, above);
+                // 显示时长要覆盖打字过程
+                let typing = b.typing_remaining().as_secs() as u64 + 1;
+                self.bubble_until = Some(Instant::now() + Duration::from_secs(secs.max(typing + 2)));
+            } else {
+                b.show_now(text, self.pos, self.pet_size, self.mon, above);
+                self.bubble_until = Some(Instant::now() + Duration::from_secs(secs));
+            }
         }
     }
 
-    /// 思考中动画泡：不设过期时间，回复到达时替换
+    /// 思考中动画泡：不设过期时间，回复到达时替换（即时显示，不走打字机）
     fn bubble_show_persistent(&mut self, text: &str) {
         if self.hidden {
             return;
         }
         let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
-            b.show(text, self.pos, self.pet_size, self.mon, above);
+            b.show_now(text, self.pos, self.pet_size, self.mon, above);
         }
         self.bubble_until = None;
     }
@@ -1060,6 +1069,7 @@ impl App {
             Entry::stay("set-follow", format!("跟随鼠标：{}", onoff(s.follow_mouse))),
             Entry::stay("set-whisper", format!("随机碎碎念：{}", onoff(s.whisper_on))),
             Entry::stay("set-hotkeys", format!("全局快捷键：{}", onoff(s.hotkeys))),
+            Entry::stay("set-typewriter", format!("打字机气泡：{}", onoff(s.typewriter))),
             Entry::stay("set-drink", format!("喝水提醒：{}", onoff(s.drink_minutes > 0))),
             Entry::stay("set-sit", format!("久坐提醒：{}", onoff(s.sit_minutes > 0))),
             Entry::sep(),
@@ -1125,6 +1135,15 @@ impl App {
                     "全局快捷键开启：Ctrl+Shift + D勿扰/T待办/C聊天/H隐藏/Q退出"
                 } else {
                     "全局快捷键关闭"
+                });
+                self.persist_toggles();
+            }
+            "set-typewriter" => {
+                self.settings.typewriter = !self.settings.typewriter;
+                self.bubble_show(if self.settings.typewriter {
+                    "打字机气泡开启啦"
+                } else {
+                    "打字机气泡关闭"
                 });
                 self.persist_toggles();
             }
@@ -1249,6 +1268,7 @@ impl App {
             ("quiet".into(), toml::Value::Boolean(st.quiet)),
             ("onboarded".into(), toml::Value::Boolean(st.onboarded)),
             ("hotkeys".into(), toml::Value::Boolean(st.hotkeys)),
+            ("typewriter".into(), toml::Value::Boolean(st.typewriter)),
         ]);
     }
 
@@ -1750,6 +1770,14 @@ impl ApplicationHandler<PetEvent> for App {
                 self.bubble_hide();
             }
         }
+        // 打字机气泡逐字推进
+        if let Some(b) = &mut self.bubble {
+            if let Some(t) = b.next_tick_at() {
+                if now >= t {
+                    b.advance_typing();
+                }
+            }
+        }
         // 反应表情结束
         if let Some(t) = self.reaction_end {
             if now >= t
@@ -1788,7 +1816,7 @@ impl ApplicationHandler<PetEvent> for App {
                     let dots = format!("{}{}", "·".repeat(self.think_frame as usize + 1), " ".repeat(2 - self.think_frame as usize));
                     let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
                     if let Some(b) = &mut self.bubble {
-                        b.show(&dots, pp, ps, mon, above);
+                        b.show_now(&dots, pp, ps, mon, above);
                     }
                 }
             }

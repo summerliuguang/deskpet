@@ -41,3 +41,7 @@ quiet = false
 onboarded = false
 # 全局快捷键 Ctrl+Shift+D勿扰/T待办/C聊天/H隐藏/Q退出（设置页也可切换）
 hotkeys = true
+# 气泡逐字打字机效果
+
+# 气泡逐字打字机效果（设置页可关）
+typewriter = true

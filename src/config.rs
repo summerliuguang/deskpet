@@ -61,6 +61,8 @@ pub struct Settings {
     pub onboarded: bool,
     /// 全局快捷键（Ctrl+Shift+D/T/C/H/Q）
     pub hotkeys: bool,
+    /// 气泡逐字打字机效果
+    pub typewriter: bool,
 }
 
 impl Default for Settings {
@@ -80,6 +82,7 @@ impl Default for Settings {
             quiet: false,
             onboarded: false,
             hotkeys: true,
+            typewriter: true,
         }
     }
 }
@@ -107,6 +110,7 @@ impl Settings {
             quiet: b("quiet", false),
             onboarded: b("onboarded", false),
             hotkeys: b("hotkeys", true),
+            typewriter: b("typewriter", true),
         }
     }
 }
