@@ -828,6 +828,7 @@ impl App {
         self.chat_history
             .push(ChatMsg { role: Role::User, text, image: image.clone() });
         self.trim_history();
+        self.log_chat("user", &self.chat_history.last().map(|m| m.text.clone()).unwrap_or_default());
         let history = if self.cfg.ai_ready() {
             Some(build_history(&self.cfg, &self.chat_history))
         } else {
@@ -1070,6 +1071,7 @@ impl App {
             Entry::stay("set-whisper", format!("随机碎碎念：{}", onoff(s.whisper_on))),
             Entry::stay("set-hotkeys", format!("全局快捷键：{}", onoff(s.hotkeys))),
             Entry::stay("set-typewriter", format!("打字机气泡：{}", onoff(s.typewriter))),
+            Entry::stay("set-chatlog", format!("聊天记录落盘：{}", onoff(s.chat_log))),
             Entry::stay("set-drink", format!("喝水提醒：{}", onoff(s.drink_minutes > 0))),
             Entry::stay("set-sit", format!("久坐提醒：{}", onoff(s.sit_minutes > 0))),
             Entry::sep(),
@@ -1144,6 +1146,15 @@ impl App {
                     "打字机气泡开启啦"
                 } else {
                     "打字机气泡关闭"
+                });
+                self.persist_toggles();
+            }
+            "set-chatlog" => {
+                self.settings.chat_log = !self.settings.chat_log;
+                self.bubble_show(if self.settings.chat_log {
+                    "聊天记录会存到 chat_log.jsonl（exe 旁边）"
+                } else {
+                    "聊天记录落盘已关闭"
                 });
                 self.persist_toggles();
             }
@@ -1269,6 +1280,7 @@ impl App {
             ("onboarded".into(), toml::Value::Boolean(st.onboarded)),
             ("hotkeys".into(), toml::Value::Boolean(st.hotkeys)),
             ("typewriter".into(), toml::Value::Boolean(st.typewriter)),
+            ("chat_log".into(), toml::Value::Boolean(st.chat_log)),
         ]);
     }
 
@@ -1560,7 +1572,14 @@ impl ApplicationHandler<PetEvent> for App {
                 match action {
                     InputAction::None => {}
                     InputAction::Close => self.input = None,
-                    InputAction::Send { text, image } => self.send_chat(text, image),
+                    InputAction::Send { text, image } => {
+                        if image.is_none() {
+                            if let Some(i) = &mut self.input {
+                                i.push_history(text.clone());
+                            }
+                        }
+                        self.send_chat(text, image);
+                    }
                 }
                 return;
             }
@@ -1707,6 +1726,7 @@ impl ApplicationHandler<PetEvent> for App {
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: reply.clone(), image: None });
                 self.trim_history();
+                self.log_chat("pet", &reply);
                 let shown: String = reply.chars().take(120).collect();
                 self.bubble_show(&shown);
                 if let Some(i) = &mut self.input {
@@ -1922,6 +1942,40 @@ impl App {
             }
             self.pos.0 = (rect.left + *off).max(self.mon.x);
             self.pos.1 = (rect.top - self.pet_size + 3).max(self.mon.y);
+        }
+    }
+}
+
+/// 聊天记录落盘：chat_log.jsonl（exe 旁），每行一条 {ts, role, text}。
+/// 超过 500 行时裁到 400；settings.chat_log 关闭时不写。
+impl App {
+    fn log_chat(&self, role: &str, text: &str) {
+        if !self.settings.chat_log || text.is_empty() {
+            return;
+        }
+        let Some(path) = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join("chat_log.jsonl")))
+        else {
+            return;
+        };
+        use std::io::Write;
+        let line = serde_json::json!({
+            "ts": deskpet::now_ms() / 1000,
+            "role": role,
+            "text": text,
+        })
+        .to_string();
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+            let _ = writeln!(f, "{line}");
+        }
+        // 低频裁剪：追加后超过 500 行则重写保留最后 400 行
+        if let Ok(content) = std::fs::read_to_string(&path) {
+            let lines: Vec<&str> = content.lines().collect();
+            if lines.len() > 500 {
+                let kept = lines[lines.len() - 400..].join("\n");
+                let _ = std::fs::write(&path, kept + "\n");
+            }
         }
     }
 }

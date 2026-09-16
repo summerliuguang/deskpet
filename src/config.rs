@@ -63,6 +63,8 @@ pub struct Settings {
     pub hotkeys: bool,
     /// 气泡逐字打字机效果
     pub typewriter: bool,
+    /// 聊天记录落盘 chat_log.jsonl（含对话内容，隐私敏感，可关）
+    pub chat_log: bool,
 }
 
 impl Default for Settings {
@@ -83,6 +85,7 @@ impl Default for Settings {
             onboarded: false,
             hotkeys: true,
             typewriter: true,
+            chat_log: true,
         }
     }
 }
@@ -111,6 +114,7 @@ impl Settings {
             onboarded: b("onboarded", false),
             hotkeys: b("hotkeys", true),
             typewriter: b("typewriter", true),
+            chat_log: b("chat_log", true),
         }
     }
 }

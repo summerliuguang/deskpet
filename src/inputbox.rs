@@ -32,6 +32,10 @@ pub struct InputBox {
     preedit: Option<String>,
     pub pending: bool,
     placeholder: String,
+    /// 本次会话发送过的消息（↑/↓ 翻阅）
+    sent_history: Vec<String>,
+    /// 历史翻阅位置：None = 不在翻阅状态（输入区与末尾对齐）
+    hist_pos: Option<usize>,
     w: i32,
     h: i32,
 }
@@ -67,9 +71,45 @@ impl InputBox {
             preedit: None,
             pending: false,
             placeholder,
+            sent_history: Vec::new(),
+            hist_pos: None,
             w,
             h,
         })
+    }
+
+    /// 记录一条已发送消息（↑/↓ 翻阅用，上限 50 条）
+    pub fn push_history(&mut self, text: String) {
+        if text.is_empty() {
+            return;
+        }
+        self.sent_history.push(text);
+        if self.sent_history.len() > 50 {
+            self.sent_history.remove(0);
+        }
+        self.hist_pos = None;
+    }
+
+    /// ↑/↓ 在已发送历史中翻阅；IME 组字中不拦截
+    fn browse_history(&mut self, up: bool) {
+        if self.sent_history.is_empty() || self.preedit.is_some() {
+            return;
+        }
+        let len = self.sent_history.len();
+        let pos = self.hist_pos.unwrap_or(len);
+        let new_pos = if up {
+            pos.saturating_sub(1)
+        } else {
+            (pos + 1).min(len) // 越过最新一条 = 回到空输入
+        };
+        if new_pos >= len {
+            self.hist_pos = None;
+            self.input.clear();
+        } else {
+            self.hist_pos = Some(new_pos);
+            self.input = self.sent_history[new_pos].clone();
+        }
+        self.draw();
     }
 
     /// 贴着宠物下方打开；贴不下（猫在屏幕底缘）就放猫上方
@@ -118,7 +158,16 @@ impl InputBox {
                         }
                         self.input.clear();
                         self.preedit = None;
+                        self.hist_pos = None;
                         InputAction::Send { text, image: None }
+                    }
+                    Key::Named(NamedKey::ArrowUp) => {
+                        self.browse_history(true);
+                        InputAction::None
+                    }
+                    Key::Named(NamedKey::ArrowDown) => {
+                        self.browse_history(false);
+                        InputAction::None
                     }
                     Key::Named(NamedKey::Backspace) => {
                         self.input.pop();
