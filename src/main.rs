@@ -128,6 +128,8 @@ struct App {
     sit_at: Option<Instant>,
     /// 定期保存会话（防断电/崩溃丢位置）
     autosave_at: Instant,
+    /// 待办截止轮询时刻
+    due_check_at: Instant,
     /// 启动诊断提示（配置文件问题），resumed 后弹一次
     startup_diag: Option<String>,
     /// 首次引导气泡显示时刻
@@ -187,6 +189,7 @@ impl App {
             drink_at: None,
             sit_at: None,
             autosave_at: Instant::now() + Duration::from_secs(300),
+            due_check_at: Instant::now() + Duration::from_secs(20),
             startup_diag,
             onboard_at: None,
         }
@@ -1785,6 +1788,17 @@ impl ApplicationHandler<PetEvent> for App {
         if now >= self.autosave_at {
             self.save_session();
             self.autosave_at = now + Duration::from_secs(300);
+        }
+        // 待办截止轮询：清单开着时每 20 秒查一次到期项，气泡提醒一次
+        if now >= self.due_check_at {
+            self.due_check_at = now + Duration::from_secs(20);
+            if let Some(todo) = &mut self.todo {
+                if let Some(text) = todo.poll_due() {
+                    if !self.hidden && !self.settings.quiet {
+                        self.bubble_show(&format!("叮咚！待办到期：{text}"));
+                    }
+                }
+            }
         }
         // 喝水/久坐提醒
         if let Some(t) = self.drink_at {
