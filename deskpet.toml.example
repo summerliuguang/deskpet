@@ -33,3 +33,9 @@ sit_minutes = 90
 # 打字时猫跟着拍爪；手柄按 A/B/X/Y 时猫有反应
 keyboard_link = true
 gamepad_link = true
+
+# ---- 勿扰与引导 ----
+# 勿扰模式：不碎碎念、不出提醒、AI 回复不出声（右键菜单可随时切换）
+quiet = false
+# 首次运行引导已看过（自动写入，一般不用手改）
+onboarded = false

@@ -716,6 +716,7 @@ impl App {
 
     fn whisper(&mut self) {
         if self.settings.whisper_on
+            && !self.settings.quiet
             && self.state == PetState::Idle
             && self.bubble_until.is_none()
             && !self.chat_pending
@@ -954,6 +955,7 @@ impl App {
             Entry::sep(),
             Entry::stay("pet-remind", format!("提醒：{}", onoff(self.settings.drink_minutes > 0))),
             Entry::stay("set-voice", format!("语音播报：{}", onoff(self.settings.voice))),
+            Entry::stay("set-quiet", format!("勿扰模式：{}", onoff(self.settings.quiet))),
             Entry::sep(),
             Entry::item(
                 "pet-sleep",
@@ -1057,6 +1059,7 @@ impl App {
             Entry::stay("set-drink", format!("喝水提醒：{}", onoff(s.drink_minutes > 0))),
             Entry::stay("set-sit", format!("久坐提醒：{}", onoff(s.sit_minutes > 0))),
             Entry::sep(),
+            Entry::stay("set-tts-sample", "试听音色"),
             Entry::item("pet-settings-help", "AI 参数请编辑 deskpet.toml"),
         ]
     }
@@ -1102,6 +1105,23 @@ impl App {
                 self.settings.voice = !self.settings.voice;
                 self.bubble_show(if self.settings.voice { "语音打开啦" } else { "语音关掉了" });
                 self.persist_toggles();
+            }
+            "set-quiet" => {
+                self.settings.quiet = !self.settings.quiet;
+                self.bubble_show(if self.settings.quiet {
+                    "勿扰模式开启：不主动说话不出声喵"
+                } else {
+                    "勿扰模式关闭，恢复碎碎念和提醒"
+                });
+                self.persist_toggles();
+            }
+            "set-tts-sample" => {
+                if self.settings.voice {
+                    let cfg = self.cfg.clone();
+                    tts::speak_force(&self.client, &cfg, true, "你好，我是团子，这是我的声音喵！");
+                } else {
+                    self.bubble_show("语音总开关是关的，先在根页打开语音播报");
+                }
             }
             "pet-sleep" => {
                 if self.state == PetState::Sleep {
@@ -1154,8 +1174,10 @@ impl App {
                 self.bubble_show("AI 参数在 deskpet.toml 里改喵");
             }
             "pet-about" => {
+                let mem = working_set_mb();
+                let mem_line = mem.map(|m| format!("内存 {m:.1} MB · ")).unwrap_or_default();
                 self.bubble_show(&format!(
-                    "{} v0.3.2 · 纯Rust桌宠\n右键→对话可接AI聊天\n设置里可开关功能",
+                    "{} v0.3.2 · 纯Rust桌宠\n{mem_line}github.com/summerliuguang/deskpet\n右键→设置 可开关功能",
                     self.model.info().name
                 ));
             }
@@ -1211,6 +1233,8 @@ impl App {
             ("gaze_follow".into(), toml::Value::Boolean(st.gaze_follow)),
             ("follow_mouse".into(), toml::Value::Boolean(st.follow_mouse)),
             ("whisper_on".into(), toml::Value::Boolean(st.whisper_on)),
+            ("quiet".into(), toml::Value::Boolean(st.quiet)),
+            ("onboarded".into(), toml::Value::Boolean(st.onboarded)),
         ]);
     }
 
@@ -1236,8 +1260,8 @@ impl App {
         } else {
             ("坐好久啦，起来伸个懒腰喵！", "主人，坐久了，起来活动一下吧")
         };
-        if self.hidden {
-            // 全屏遮挡：静默顺延，不弹泡不出声
+        if self.hidden || self.settings.quiet {
+            // 全屏遮挡/勿扰：静默顺延，不弹泡不出声
             self.arm_reminders();
             return;
         }
@@ -1623,8 +1647,8 @@ impl ApplicationHandler<PetEvent> for App {
                     Ok(t) => t,
                     Err(e) => format!("出错了：{e}"),
                 };
-                // 全屏时不出声（游戏/视频不被打断）
-                if !self.hidden {
+                // 全屏/勿扰时不出声（游戏/视频不被打断；文字气泡照常）
+                if !self.hidden && !self.settings.quiet {
                     let cfg = self.cfg.clone();
                     tts::speak(&self.client, &cfg, self.settings.voice, &reply);
                 }
@@ -1837,6 +1861,29 @@ fn cursor_pos() -> Option<(i32, i32)> {
     use windows::Win32::UI::WindowsAndMessaging::GetCursorPos;
     let mut pt = POINT::default();
     unsafe { GetCursorPos(&mut pt).ok().map(|_| (pt.x, pt.y)) }
+}
+
+/// 当前进程工作集（MB），关于气泡展示；读取失败返回 None
+#[cfg(windows)]
+fn working_set_mb() -> Option<f32> {
+    use windows::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS,
+    };
+    use windows::Win32::System::Threading::GetCurrentProcess;
+    unsafe {
+        let mut counters = PROCESS_MEMORY_COUNTERS::default();
+        counters.cb = std::mem::size_of::<PROCESS_MEMORY_COUNTERS>() as u32;
+        if GetProcessMemoryInfo(GetCurrentProcess(), &mut counters, counters.cb).is_ok() {
+            Some(counters.WorkingSetSize as f32 / 1024.0 / 1024.0)
+        } else {
+            None
+        }
+    }
+}
+
+#[cfg(not(windows))]
+fn working_set_mb() -> Option<f32> {
+    None
 }
 
 /// 全屏检测：前台窗口是否铺满所在显示器（带 4px 容差）。

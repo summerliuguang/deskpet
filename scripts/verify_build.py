@@ -16,6 +16,10 @@ checks = {
     '手柄联动': '手柄真好玩'.encode(),
     '喂食语音': '小鱼干最棒了喵'.encode(),
     'AI 离线提示': '就能聊天啦'.encode(),
+    '勿扰模式': '勿扰模式开启'.encode(),
+    'TTS 试听': '这是我的声音喵'.encode(),
+    '首次引导': '长按拖动、双击睡觉'.encode(),
+    'AI 重试': '重试 2 次仍失败'.encode(),
 }
 missing = [name for name, sig in checks.items() if sig not in exe]
 print(f'{path}: {len(exe)} 字节')
