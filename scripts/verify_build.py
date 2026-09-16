@@ -20,6 +20,7 @@ checks = {
     'TTS 试听': '这是我的声音喵'.encode(),
     '首次引导': '长按拖动、双击睡觉'.encode(),
     'AI 重试': '重试 2 次仍失败'.encode(),
+    '全局快捷键': '全局快捷键开启'.encode(),
 }
 missing = [name for name, sig in checks.items() if sig not in exe]
 print(f'{path}: {len(exe)} 字节')

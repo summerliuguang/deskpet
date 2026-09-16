@@ -39,3 +39,5 @@ gamepad_link = true
 quiet = false
 # 首次运行引导已看过（自动写入，一般不用手改）
 onboarded = false
+# 全局快捷键 Ctrl+Shift+D勿扰/T待办/C聊天/H隐藏/Q退出（设置页也可切换）
+hotkeys = true

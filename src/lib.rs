@@ -22,6 +22,8 @@ pub enum PetEvent {
     Typing,
     /// 手柄按键
     Gamepad,
+    /// 全局快捷键（Ctrl+Shift + D勿扰/T待办/C聊天/H隐藏/Q退出）
+    Hotkey(u32),
 }
 
 pub type PetEventProxy = winit::event_loop::EventLoopProxy<PetEvent>;

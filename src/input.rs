@@ -73,4 +73,36 @@ pub mod win {
             }
         });
     }
+
+    /// 全局快捷键线程：Ctrl+Shift + D勿扰 / T待办 / C聊天 / H隐藏显示 / Q退出。
+    /// 被其他程序占用的组合注册失败时跳过（不影响其余键）；
+    /// 线程常驻，开关由主循环按 settings.hotkeys 过滤。
+    pub fn spawn_hotkeys(proxy: crate::PetEventProxy) {
+        use windows::Win32::Foundation::HWND;
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            RegisterHotKey, HOT_KEY_MODIFIERS, MOD_CONTROL, MOD_SHIFT,
+        };
+        use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+        std::thread::spawn(move || unsafe {
+            let modifier: HOT_KEY_MODIFIERS = MOD_CONTROL | MOD_SHIFT;
+            // (事件 id, 虚拟键码)
+            let keys = [
+                (0u32, b'D' as u32),
+                (1, b'T' as u32),
+                (2, b'C' as u32),
+                (3, b'H' as u32),
+                (4, b'Q' as u32),
+            ];
+            for (id, vk) in keys {
+                // None = 关联到调用线程的消息队列（无需窗口）
+                let _ = RegisterHotKey(Some(HWND::default()), id as i32, modifier, vk);
+            }
+            let mut msg = MSG::default();
+            while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+                if msg.message == WM_HOTKEY {
+                    let _ = proxy.send_event(crate::PetEvent::Hotkey(msg.wParam.0 as u32));
+                }
+            }
+        });
+    }
 }

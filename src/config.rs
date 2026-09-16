@@ -59,6 +59,8 @@ pub struct Settings {
     pub quiet: bool,
     /// 首次引导已看过（只提示一次）
     pub onboarded: bool,
+    /// 全局快捷键（Ctrl+Shift+D/T/C/H/Q）
+    pub hotkeys: bool,
 }
 
 impl Default for Settings {
@@ -77,6 +79,7 @@ impl Default for Settings {
             whisper_on: true,
             quiet: false,
             onboarded: false,
+            hotkeys: true,
         }
     }
 }
@@ -103,6 +106,7 @@ impl Settings {
             whisper_on: b("whisper_on", true),
             quiet: b("quiet", false),
             onboarded: b("onboarded", false),
+            hotkeys: b("hotkeys", true),
         }
     }
 }

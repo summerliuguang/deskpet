@@ -1059,6 +1059,7 @@ impl App {
             Entry::stay("set-gaze", format!("目光跟随：{}", onoff(s.gaze_follow))),
             Entry::stay("set-follow", format!("跟随鼠标：{}", onoff(s.follow_mouse))),
             Entry::stay("set-whisper", format!("随机碎碎念：{}", onoff(s.whisper_on))),
+            Entry::stay("set-hotkeys", format!("全局快捷键：{}", onoff(s.hotkeys))),
             Entry::stay("set-drink", format!("喝水提醒：{}", onoff(s.drink_minutes > 0))),
             Entry::stay("set-sit", format!("久坐提醒：{}", onoff(s.sit_minutes > 0))),
             Entry::sep(),
@@ -1115,6 +1116,15 @@ impl App {
                     "勿扰模式开启：不主动说话不出声喵"
                 } else {
                     "勿扰模式关闭，恢复碎碎念和提醒"
+                });
+                self.persist_toggles();
+            }
+            "set-hotkeys" => {
+                self.settings.hotkeys = !self.settings.hotkeys;
+                self.bubble_show(if self.settings.hotkeys {
+                    "全局快捷键开启：Ctrl+Shift + D勿扰/T待办/C聊天/H隐藏/Q退出"
+                } else {
+                    "全局快捷键关闭"
                 });
                 self.persist_toggles();
             }
@@ -1238,6 +1248,7 @@ impl App {
             ("whisper_on".into(), toml::Value::Boolean(st.whisper_on)),
             ("quiet".into(), toml::Value::Boolean(st.quiet)),
             ("onboarded".into(), toml::Value::Boolean(st.onboarded)),
+            ("hotkeys".into(), toml::Value::Boolean(st.hotkeys)),
         ]);
     }
 
@@ -1280,6 +1291,48 @@ impl App {
             w.request_redraw();
         }
         self.arm_reminders();
+    }
+
+    // ---------- 隐藏/恢复（全屏遮挡与快捷键共用） ----------
+
+    fn set_hidden(&mut self, el: &ActiveEventLoop, hide: bool) {
+        self.hidden = hide;
+        let Some(w) = &self.window else { return };
+        w.set_visible(!hide);
+        if hide {
+            self.menu = None;
+            // 瞬态状态立即落地，避免隐藏期间动画停摆、恢复后冻结
+            self.press = None;
+            if matches!(
+                self.state,
+                PetState::Thrown | PetState::Climb | PetState::Dragged | PetState::Perch
+            ) {
+                self.perch = None;
+                self.pos.1 = self.mon_bottom();
+                w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                self.hang_until = None;
+                self.climb_wall = 0;
+                self.enter_idle();
+            }
+            self.bubble_hide();
+            if let Some(i) = &self.input {
+                i.window.set_visible(false);
+            }
+            if let Some(t) = &self.todo {
+                t.window.set_visible(false);
+            }
+            self.frame_at = None;
+            self.typing_until = None;
+            el.set_control_flow(ControlFlow::Wait);
+        } else {
+            if let Some(i) = &self.input {
+                i.window.set_visible(true);
+            }
+            if let Some(t) = &self.todo {
+                t.window.set_visible(true);
+            }
+            w.request_redraw();
+        }
     }
 }
 
@@ -1428,6 +1481,8 @@ impl ApplicationHandler<PetEvent> for App {
                 input::win::spawn_gamepad_poll(self.proxy.clone());
                 dlog("手柄轮询已启动");
             }
+            input::win::spawn_hotkeys(self.proxy.clone());
+            dlog("全局快捷键已注册（Ctrl+Shift+D/T/C/H/Q）");
         }
 
         window.request_redraw();
@@ -1600,47 +1655,21 @@ impl ApplicationHandler<PetEvent> for App {
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: PetEvent) {
         match event {
-            PetEvent::FullscreenChanged(fs) => {
-                self.hidden = fs;
-                if let Some(w) = &self.window {
-                    w.set_visible(!fs);
-                    if fs {
-                        self.menu = None;
-                        // 瞬态状态立即落地，避免隐藏期间动画停摆、恢复后冻结
-                        self.press = None;
-                        if matches!(
-                            self.state,
-                            PetState::Thrown
-                                | PetState::Climb
-                                | PetState::Dragged
-                                | PetState::Perch
-                        ) {
-                            self.perch = None;
-                            self.pos.1 = self.mon_bottom();
-                            w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                            self.hang_until = None;
-                            self.climb_wall = 0;
-                            self.enter_idle();
-                        }
-                        self.bubble_hide();
-                        if let Some(i) = &self.input {
-                            i.window.set_visible(false);
-                        }
-                        if let Some(t) = &self.todo {
-                            t.window.set_visible(false);
-                        }
-                        self.frame_at = None;
-                        self.typing_until = None;
-                        el.set_control_flow(ControlFlow::Wait);
-                        return;
+            PetEvent::FullscreenChanged(fs) => self.set_hidden(el, fs),
+            PetEvent::Hotkey(id) => {
+                if !self.settings.hotkeys {
+                    return;
+                }
+                match id {
+                    0 => self.menu_action("set-quiet", el),
+                    1 => self.ensure_todo(el),
+                    2 => self.ensure_input(el),
+                    3 => self.set_hidden(el, !self.hidden),
+                    4 => {
+                        self.save_session();
+                        el.exit();
                     }
-                    if let Some(i) = &self.input {
-                        i.window.set_visible(true);
-                    }
-                    if let Some(t) = &self.todo {
-                        t.window.set_visible(true);
-                    }
-                    w.request_redraw();
+                    _ => {}
                 }
             }
             PetEvent::ChatReply(r) => {
