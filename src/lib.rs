@@ -24,12 +24,14 @@ pub enum PetEvent {
     Gamepad,
     /// 全局快捷键（Ctrl+Shift + D勿扰/T待办/C聊天/H隐藏/Q退出）
     Hotkey(u32),
+    /// 显示器拓扑变化（热插拔/分辨率改变）
+    MonitorsChanged,
 }
 
 pub type PetEventProxy = winit::event_loop::EventLoopProxy<PetEvent>;
 
 /// 显示器矩形（多屏适配）
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MonRect {
     pub x: i32,
     pub y: i32,
@@ -45,6 +47,15 @@ impl MonRect {
     pub fn contains_center(&self, px: i32, py: i32, size: i32) -> bool {
         let (cx, cy) = (px + size / 2, py + size / 2);
         cx >= self.x && cx < self.x + self.w && cy >= self.y && cy < self.y + self.h
+    }
+
+    /// 带容差的中心判定：宠物中心在显示器外扩 tol 后仍算在屏内。
+    /// 跨屏拖动/飞行落点贴近边缘时避免"突跳归属"到另一块屏。
+    pub fn contains_center_tol(&self, px: i32, py: i32, size: i32, tol: i32) -> bool {
+        let (cx, cy) = (px + size / 2, py + size / 2);
+        let (x1, y1) = (self.x - tol, self.y - tol);
+        let (x2, y2) = (self.x + self.w + tol, self.y + self.h + tol);
+        cx >= x1 && cx < x2 && cy >= y1 && cy < y2
     }
 }
 
@@ -85,5 +96,18 @@ mod tests {
         let m = MonRect { x: 100, y: 0, w: 800, h: 600 };
         assert!(m.contains_center(400, 300, 64));
         assert!(!m.contains_center(0, 0, 64), "左屏外的点不应命中");
+    }
+
+    #[test]
+    fn monrect_contains_center_with_tolerance() {
+        let m = MonRect { x: 0, y: 0, w: 800, h: 600 };
+        let size = 64;
+        // 中心在右缘外 8px（< tol=16）：带容差命中，无容差不命中
+        let outside_x = 800 + 8 - size / 2;
+        assert!(!m.contains_center(outside_x, 300, size));
+        assert!(m.contains_center_tol(outside_x, 300, size, size / 4));
+        // 中心在外 40px（> tol）：带容差也不命中
+        let far_x = 800 + 40 - size / 2;
+        assert!(!m.contains_center_tol(far_x, 300, size, size / 4));
     }
 }

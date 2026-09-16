@@ -503,7 +503,13 @@ impl App {
     }
 
     fn resolve_mon(&mut self) {
-        if let Some(m) = self.mons.iter().find(|m| m.contains_center(self.pos.0, self.pos.1, self.pet_size)) {
+        // 容差 = 边长 1/4：贴边落点不突跳到另一块屏
+        let tol = (self.pet_size / 4).max(1);
+        if let Some(m) = self
+            .mons
+            .iter()
+            .find(|m| m.contains_center_tol(self.pos.0, self.pos.1, self.pet_size, tol))
+        {
             if m.x != self.mon.x || m.y != self.mon.y {
                 self.mon = *m;
             }
@@ -1327,6 +1333,47 @@ impl App {
 
     // ---------- 隐藏/恢复（全屏遮挡与快捷键共用） ----------
 
+    /// 显示器热插拔/分辨率变化：重枚举，宠物所在屏消失时迁移并夹回可见区域
+    fn refresh_monitors(&mut self, el: &ActiveEventLoop) {
+        let new_mons = collect_mons(el);
+        if new_mons.is_empty() || new_mons == self.mons {
+            return;
+        }
+        self.mons = new_mons;
+        dlog(&format!("显示器变化 → {} 块", self.mons.len()));
+        let still_here = self
+            .mons
+            .iter()
+            .any(|m| m.x == self.mon.x && m.y == self.mon.y);
+        if !still_here {
+            // 原屏没了：找包含宠物中心的屏，否则搬到第一块
+            let cx = self.pos.0 + self.pet_size / 2;
+            let cy = self.pos.1 + self.pet_size / 2;
+            self.mon = self
+                .mons
+                .iter()
+                .find(|m| m.contains_point(cx, cy))
+                .copied()
+                .unwrap_or(self.mons[0]);
+        }
+        // 夹回当前屏可见范围
+        let max_x = (self.mon.x + self.mon.w - self.pet_size).max(self.mon.x);
+        let max_y = self.mon_bottom().max(self.mon.y);
+        let new_pos = (
+            self.pos.0.clamp(self.mon.x, max_x),
+            self.pos.1.clamp(self.mon.y, max_y),
+        );
+        if new_pos != self.pos {
+            self.pos = new_pos;
+            if let Some(w) = &self.window {
+                w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+            }
+        }
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
     fn set_hidden(&mut self, el: &ActiveEventLoop, hide: bool) {
         self.hidden = hide;
         let Some(w) = &self.window else { return };
@@ -1403,17 +1450,7 @@ impl ApplicationHandler<PetEvent> for App {
         dlog("窗口创建成功");
 
         // 多屏：收集所有显示器，初始用窗口所在的那块
-        self.mons = el
-            .available_monitors()
-            .into_iter()
-            .map(|m| MonRect {
-                x: m.position().x,
-                y: m.position().y,
-                w: m.size().width as i32,
-                h: m.size().height as i32,
-            })
-            .filter(|m| m.w > 0 && m.h > 0)
-            .collect();
+        self.mons = collect_mons(el);
         if self.mons.is_empty() {
             self.mons = vec![MonRect { x: 0, y: 0, w: 1280, h: 720 }];
         }
@@ -1695,6 +1732,9 @@ impl ApplicationHandler<PetEvent> for App {
     fn user_event(&mut self, el: &ActiveEventLoop, event: PetEvent) {
         match event {
             PetEvent::FullscreenChanged(fs) => self.set_hidden(el, fs),
+            PetEvent::MonitorsChanged => {
+                self.refresh_monitors(el);
+            }
             PetEvent::Hotkey(id) => {
                 if !self.settings.hotkeys {
                     return;
@@ -2049,15 +2089,82 @@ unsafe fn foreground_is_fullscreen() -> bool {
 fn spawn_fullscreen_watcher(proxy: PetEventProxy) {
     std::thread::spawn(move || {
         let mut was = false;
+        let mut mon_fp = monitor_fingerprint();
         loop {
             let fs = unsafe { foreground_is_fullscreen() };
             if fs != was {
                 was = fs;
                 let _ = proxy.send_event(PetEvent::FullscreenChanged(fs));
             }
+            // 显示器热插拔/分辨率变化：指纹比对（2 秒一次，开销可忽略）
+            let fp = monitor_fingerprint();
+            if fp != mon_fp {
+                mon_fp = fp;
+                let _ = proxy.send_event(PetEvent::MonitorsChanged);
+            }
             std::thread::sleep(Duration::from_millis(2000));
         }
     });
+}
+
+/// 所有显示器的拓扑指纹（位置+尺寸；数量变化或分辨率变化都会改变指纹）
+#[cfg(windows)]
+fn monitor_fingerprint() -> u64 {
+    use windows::Win32::Foundation::{LPARAM, RECT};
+    use windows::Win32::Graphics::Gdi::{
+        EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO,
+    };
+    unsafe extern "system" fn cb(
+        hmon: HMONITOR,
+        _hdc: HDC,
+        _rect: *mut RECT,
+        lparam: LPARAM,
+    ) -> windows::core::BOOL {
+        let list = &mut *(lparam.0 as *mut Vec<(i32, i32, i32, i32)>);
+        let mut info = MONITORINFO::default();
+        info.cbSize = std::mem::size_of::<MONITORINFO>() as u32;
+        if GetMonitorInfoW(hmon, &mut info).as_bool() {
+            let r = info.rcMonitor;
+            list.push((r.left, r.top, r.right - r.left, r.bottom - r.top));
+        }
+        true.into()
+    }
+    let mut list: Vec<(i32, i32, i32, i32)> = Vec::new();
+    unsafe {
+        let _ = EnumDisplayMonitors(
+            None,
+            None,
+            Some(cb),
+            LPARAM(&mut list as *mut _ as isize),
+        );
+    }
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &(x, y, w, h) in &list {
+        for v in [x, y, w, h] {
+            hash ^= v as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+    }
+    hash
+}
+
+#[cfg(not(windows))]
+fn monitor_fingerprint() -> u64 {
+    0
+}
+
+/// 枚举当前所有显示器（winit 视角，物理坐标）
+fn collect_mons(el: &ActiveEventLoop) -> Vec<MonRect> {
+    el.available_monitors()
+        .into_iter()
+        .map(|m| MonRect {
+            x: m.position().x,
+            y: m.position().y,
+            w: m.size().width as i32,
+            h: m.size().height as i32,
+        })
+        .filter(|m| m.w > 0 && m.h > 0)
+        .collect()
 }
 
 #[cfg(not(windows))]
