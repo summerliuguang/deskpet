@@ -527,7 +527,7 @@ fn parse_due(rest: &str) -> Option<i64> {
 }
 
 /// 输入行解析（独立函数便于测试）：`!高/!低` 前缀、`@HH:MM/@HH` 截止、
-/// 其余 token 组成纯文本；非法 token 原样保留在文本中
+/// 其余片段组成纯文本；无法识别的记号原样保留在文本中
 fn parse_input_line(raw: &str) -> (String, Priority, Option<i64>) {
     let mut text = String::new();
     let mut priority = Priority::Normal;
