@@ -126,10 +126,16 @@ struct App {
     perch: Option<(isize, i32, u32)>,
     drink_at: Option<Instant>,
     sit_at: Option<Instant>,
+    /// 定期保存会话（防断电/崩溃丢位置）
+    autosave_at: Instant,
+    /// 启动诊断提示（配置文件问题），resumed 后弹一次
+    startup_diag: Option<String>,
+    /// 首次引导气泡显示时刻
+    onboard_at: Option<Instant>,
 }
 
 impl App {
-    fn new(cfg: Config, settings: Settings, proxy: PetEventProxy) -> Self {
+    fn new(cfg: Config, settings: Settings, proxy: PetEventProxy, startup_diag: Option<String>) -> Self {
         Self {
             proxy,
             window: None,
@@ -180,6 +186,9 @@ impl App {
             perch: None,
             drink_at: None,
             sit_at: None,
+            autosave_at: Instant::now() + Duration::from_secs(300),
+            startup_diag,
+            onboard_at: None,
         }
     }
 
@@ -512,6 +521,8 @@ impl App {
             self.hang_until,
             self.drink_at,
             self.sit_at,
+            Some(self.autosave_at),
+            self.onboard_at,
             press_deadline,
         ]
         .into_iter()
@@ -828,8 +839,27 @@ impl App {
                 let client = self.client.clone();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    let r = client.chat(&cfg, &model, &h);
-                    let _ = proxy.send_event(PetEvent::ChatReply(r));
+                    // 最多 3 次尝试（间隔 1s/2s）：网络抖动或网关瞬时报错时自愈
+                    let mut result = Err("未发送".into());
+                    for (attempt, wait) in [0u64, 1, 2].iter().enumerate() {
+                        if *wait > 0 {
+                            std::thread::sleep(Duration::from_secs(*wait));
+                        }
+                        match client.chat(&cfg, &model, &h) {
+                            Ok(r) => {
+                                result = Ok(r);
+                                break;
+                            }
+                            Err(e) => {
+                                result = if attempt == 2 {
+                                    Err(format!("{e}（重试 2 次仍失败）"))
+                                } else {
+                                    Err(e)
+                                };
+                            }
+                        }
+                    }
+                    let _ = proxy.send_event(PetEvent::ChatReply(result));
                 });
             }
             None => {
@@ -1349,6 +1379,11 @@ impl ApplicationHandler<PetEvent> for App {
 
         self.whisper_at = Some(Instant::now() + Duration::from_secs(25));
         self.arm_reminders();
+        // 启动延迟消息：配置问题提示优先，否则首次运行引导（引导只出现一次）
+        if !self.settings.onboarded || self.startup_diag.is_some() {
+            let delay = if self.startup_diag.is_some() { 800 } else { 2500 };
+            self.onboard_at = Some(Instant::now() + Duration::from_millis(delay));
+        }
 
         #[cfg(windows)]
         {
@@ -1708,6 +1743,24 @@ impl ApplicationHandler<PetEvent> for App {
                 self.whisper_at = None;
                 self.whisper();
             }
+        }
+        // 启动消息：配置问题 / 首次引导
+        if let Some(t) = self.onboard_at {
+            if now >= t {
+                self.onboard_at = None;
+                if let Some(diag) = self.startup_diag.take() {
+                    self.bubble_show(&diag);
+                } else if !self.settings.onboarded {
+                    self.settings.onboarded = true;
+                    self.persist_toggles();
+                    self.bubble_show("右键我打开菜单喵！长按拖动、双击睡觉，拖张图片给我看看～");
+                }
+            }
+        }
+        // 周期保存会话（防崩溃/断电丢位置与开关）
+        if now >= self.autosave_at {
+            self.save_session();
+            self.autosave_at = now + Duration::from_secs(300);
         }
         // 喝水/久坐提醒
         if let Some(t) = self.drink_at {
@@ -2088,6 +2141,10 @@ fn main() {
     let text = deskpet::config::load_text();
     let cfg = text.as_deref().map(deskpet::config::parse_config).unwrap_or_default();
     let settings = deskpet::config::parse_settings(text.as_deref().unwrap_or(""));
+    let startup_diag = deskpet::config::config_diag(text.as_deref());
+    if let Some(d) = &startup_diag {
+        dlog(d);
+    }
     dlog(if cfg.ai_ready() {
         "配置已加载：AI 已配置"
     } else {
@@ -2098,6 +2155,6 @@ fn main() {
         .expect("创建事件循环失败");
     let proxy = event_loop.create_proxy();
     spawn_fullscreen_watcher(proxy.clone());
-    let mut app = App::new(cfg, settings, proxy);
+    let mut app = App::new(cfg, settings, proxy, startup_diag);
     event_loop.run_app(&mut app).expect("事件循环异常退出");
 }

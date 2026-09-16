@@ -55,6 +55,10 @@ pub struct Settings {
     pub gaze_follow: bool,
     pub follow_mouse: bool,
     pub whisper_on: bool,
+    /// 勿扰模式：停碎碎念/提醒/语音，互动仍可用
+    pub quiet: bool,
+    /// 首次引导已看过（只提示一次）
+    pub onboarded: bool,
 }
 
 impl Default for Settings {
@@ -71,6 +75,8 @@ impl Default for Settings {
             gaze_follow: true,
             follow_mouse: false,
             whisper_on: true,
+            quiet: false,
+            onboarded: false,
         }
     }
 }
@@ -95,6 +101,8 @@ impl Settings {
             gaze_follow: b("gaze_follow", true),
             follow_mouse: b("follow_mouse", false),
             whisper_on: b("whisper_on", true),
+            quiet: b("quiet", false),
+            onboarded: b("onboarded", false),
         }
     }
 }
@@ -159,7 +167,8 @@ pub fn parse_settings(text: &str) -> Settings {
     Settings::parse(text)
 }
 
-/// 把行为开关合并写回 deskpet.toml（保留其他字段，如 api_key）
+/// 把行为开关合并写回 deskpet.toml（保留其他字段，如 api_key）。
+/// 原子写：先写临时文件再改名，进程中途被杀不会留下半截配置。
 pub fn persist_settings(pairs: &[(String, toml::Value)]) {
     let target = candidate_paths().first().cloned();
     let Some(path) = target else { return };
@@ -174,8 +183,29 @@ pub fn persist_settings(pairs: &[(String, toml::Value)]) {
     }
     if let Ok(out) = toml::to_string(&table) {
         let header = "# deskpet 配置（由菜单-设置页与手写配置共用）\n";
-        let _ = std::fs::write(&path, format!("{header}\n{out}"));
+        let tmp = path.with_extension("toml.tmp");
+        if std::fs::write(&tmp, format!("{header}\n{out}")).is_ok() {
+            let _ = std::fs::rename(&tmp, &path);
+        }
     }
+}
+
+/// 配置诊断：deskpet.toml 存在但解析失败时返回提示
+/// （字段缺省静默回退默认值没问题；整个文件坏掉用户该知道）。
+pub fn config_diag(text: Option<&str>) -> Option<String> {
+    let text = text?;
+    if text.parse::<toml::Value>().is_err() {
+        return Some("deskpet.toml 格式有误，本次启动按默认配置运行".into());
+    }
+    // 单字段校验：base_url 必须是 http(s) URL，写错时聊天必然失败
+    if let Ok(v) = text.parse::<toml::Value>() {
+        if let Some(bu) = v.get("base_url").and_then(|x| x.as_str()) {
+            if !bu.is_empty() && !bu.starts_with("http://") && !bu.starts_with("https://") {
+                return Some("deskpet.toml 的 base_url 应以 http:// 或 https:// 开头".into());
+            }
+        }
+    }
+    None
 }
 
 #[cfg(test)]
@@ -212,6 +242,18 @@ mod tests {
     fn parse_config_empty_vision_model_falls_back() {
         assert_eq!(parse_config("").vision_model, Some("deepseek-flash".into()));
         assert_eq!(parse_config("vision_model = \"\"").vision_model, Some("deepseek-flash".into()));
+    }
+
+    #[test]
+    fn config_diag_flags_broken_toml_and_bad_url() {
+        assert_eq!(config_diag(None), None, "无配置文件不提示");
+        assert_eq!(config_diag(Some("api_key = \"x\"\n")), None, "合法配置不提示");
+        assert!(config_diag(Some("这不是 toml {{{")).is_some(), "解析失败要提示");
+        assert!(
+            config_diag(Some("base_url = \"your-gateway.example/v1\"")).is_some(),
+            "base_url 缺协议要提示"
+        );
+        assert_eq!(config_diag(Some("base_url = \"\"")), None, "空 base_url 走默认，不提示");
     }
 
     #[test]
