@@ -217,7 +217,9 @@ impl PetModel for SpriteModel {
     }
 }
 
-/// 扫描 models/ 根目录下的模型：(显示名, 模型目录)
+/// 扫描 models/ 根目录下的模型：(显示名, 模型目录)。
+/// 结果按显示名稳定排序——模型注册表下标会被持久化（settings.model_kind），
+/// 目录枚举顺序在 Windows 上无保证，不排序会导致重启后恢复到错误的模型。
 pub fn discover(base: &Path) -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     let Ok(entries) = std::fs::read_dir(base) else {
@@ -236,6 +238,7 @@ pub fn discover(base: &Path) -> Vec<(String, PathBuf)> {
             .unwrap_or_else(|| dir.file_name().unwrap().to_string_lossy().to_string());
         out.push((name, dir));
     }
+    out.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     out
 }
 
@@ -256,6 +259,24 @@ pub fn encode_png(path: &Path, w: u32, h: u32, argb: &[u32]) -> Result<(), Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// discover 结果按显示名稳定排序（注册表下标被持久化，顺序乱会恢复错模型）
+    #[test]
+    fn discover_results_sorted_by_name() {
+        let base = std::env::temp_dir().join(format!("deskpet_discover_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        for name in ["乙模型", "甲模型"] {
+            let d = base.join(name);
+            std::fs::create_dir_all(&d).unwrap();
+            std::fs::write(d.join("model.toml"), format!("name = \"{name}\"\n")).unwrap();
+        }
+        let found = discover(&base);
+        let _ = std::fs::remove_dir_all(&base);
+        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted, "discover 应按显示名排序: {names:?}");
+    }
 
     /// 端到端：models/示例猫（由 export_example_model 导出并随仓库分发）
     /// 必须能被 discover 发现、加载成功，且渲染出非空帧

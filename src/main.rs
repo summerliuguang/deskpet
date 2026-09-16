@@ -276,6 +276,7 @@ impl App {
         (0, 0)
     }
 
+    /// 状态机推进：分发到各状态的子方法；末尾统一处理气泡跟随。
     fn advance(&mut self, window: &Window) {
         // 右键菜单打开期间暂停位移（菜单不跟着跑），动画帧照常
         let ui_modal = self.menu.is_some();
@@ -299,162 +300,17 @@ impl App {
             }
         }
         match self.state {
-            PetState::Idle => {
-                self.tick += 1;
-                if self.tick >= self.state_len {
-                    if self.idle_cycles >= 2 {
-                        self.state = PetState::Sleep;
-                        self.tick = 0;
-                    } else if self.input.is_none() {
-                        // 输入框打开时不去散步：原地待着陪主人打字（睡意也不累积）
-                        self.idle_cycles += 1;
-                        self.enter_walk();
-                    } else {
-                        self.tick = 0;
-                    }
-                }
-            }
-            PetState::Walk => {
-                self.tick += 1;
-                if !ui_modal {
-                    self.pos.0 += self.dir * WALK_STEP;
-                    if self.pos.0 < self.mon.x {
-                        self.pos.0 = self.mon.x;
-                        self.dir = 1;
-                        // 撞左墙：概率爬墙
-                        if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                            self.pos.0 += WALK_STEP;
-                            self.enter_climb(-1);
-                        }
-                    } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
-                        self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
-                        self.dir = -1;
-                        if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                            self.pos.0 -= WALK_STEP;
-                            self.enter_climb(1);
-                        }
-                    }
-                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                }
-                if self.tick >= self.state_len {
-                    // 随机休息姿势：坐 / 伸懒腰 / 舔毛，小概率去趴窗
-                    let roll = self.rand() % 100;
-                    if roll <= 9 && self.mon.h >= 240 {
-                        self.perch_on_window();
-                    } else if roll <= 34 {
-                        let t = self.rand_range(6, 14) as u32;
-                        self.enter_pose(PetState::Sitting, t, None);
-                    } else if roll <= 49 {
-                        self.enter_pose(PetState::Stretch, 4, Some("伸个懒腰～"));
-                    } else if roll <= 69 {
-                        let t = self.rand_range(8, 16) as u32;
-                        self.enter_pose(PetState::Groom, t, None);
-                    } else {
-                        self.enter_idle();
-                    }
-                }
-            }
+            PetState::Idle => self.advance_idle(),
+            PetState::Walk => self.advance_walk(window, ui_modal),
             PetState::Sitting | PetState::Stretch | PetState::Groom | PetState::Eat => {
                 self.tick += 1;
                 if self.tick >= self.state_len {
                     self.enter_idle();
                 }
             }
-            PetState::Perch => {
-                self.tick += 1;
-                #[cfg(windows)]
-                if !ui_modal {
-                    self.perch_follow();
-                }
-                let done = self.perch.as_ref().map(|(_, _, t)| *t == 0).unwrap_or(true);
-                if done {
-                    // 从窗口上跳下来
-                    self.perch = None;
-                    self.state = PetState::Thrown;
-                    self.tick = 0;
-                    self.thrown_vel = (0.0, -0.1);
-                    self.frame_at = Some(Instant::now() + Duration::from_millis(THROWN_FRAME_MS));
-                    return;
-                }
-                if !ui_modal {
-                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                }
-            }
-            PetState::Climb => {
-                self.tick += 1;
-                if let Some(h) = self.hang_until {
-                    // 在顶上挂一会儿
-                    if Instant::now() >= h {
-                        self.hang_until = None;
-                        self.climb_vertical = 1;
-                    }
-                } else if self.climb_vertical < 0 {
-                    self.pos.1 -= CLIMB_STEP;
-                    if self.pos.1 <= self.mon.y + 2 {
-                        self.pos.1 = self.mon.y + 2;
-                        self.hang_until = Some(Instant::now() + Duration::from_millis(1200));
-                    }
-                } else {
-                    self.pos.1 += CLIMB_STEP;
-                    if self.pos.1 >= self.mon_bottom() {
-                        self.pos.1 = self.mon_bottom();
-                        // 落地后往屏幕里挪，结束爬墙
-                        self.pos.0 = if self.climb_wall > 0 {
-                            self.pos.0 - 12
-                        } else {
-                            self.pos.0 + 12
-                        };
-                        self.climb_wall = 0;
-                        self.hang_until = None;
-                        self.enter_idle();
-                    }
-                }
-                if !ui_modal {
-                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                }
-            }
-            PetState::Thrown => {
-                let dt = THROWN_FRAME_MS as f32;
-                let (mut vx, mut vy) = self.thrown_vel;
-                let mut landed = false;
-                if !ui_modal {
-                    self.pos.0 += (vx * dt) as i32;
-                    self.pos.1 += (vy * dt) as i32;
-                    vy += GRAVITY * dt;
-                    if self.pos.0 < self.mon.x {
-                        self.pos.0 = self.mon.x;
-                        vx = -vx * 0.7;
-                    }
-                    if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
-                        self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
-                        vx = -vx * 0.7;
-                    }
-                    if self.pos.1 < self.mon.y {
-                        self.pos.1 = self.mon.y;
-                        vy = 0.0;
-                    }
-                    let floor = self.mon_bottom();
-                    if self.pos.1 >= floor {
-                        self.pos.1 = floor;
-                        vy = -vy * 0.45;
-                        vx *= 0.75;
-                        if vy.abs() < 0.06 {
-                            vy = 0.0;
-                            landed = true;
-                        }
-                    }
-                    self.thrown_vel = (vx, vy);
-                    window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                }
-                if landed {
-                    self.resolve_mon();
-                    self.enter_idle();
-                    self.reaction_end = Some(Instant::now() + Duration::from_millis(700));
-                    self.state = PetState::Shocked;
-                    self.tick = 0;
-                    self.bubble_show("喵呜…晕了");
-                }
-            }
+            PetState::Perch => self.advance_perch(window, ui_modal),
+            PetState::Climb => self.advance_climb(window, ui_modal),
+            PetState::Thrown => self.advance_thrown(window, ui_modal),
             PetState::Dragged | PetState::Patted | PetState::Shocked | PetState::Sleep => {
                 self.tick += 1;
             }
@@ -467,6 +323,165 @@ impl App {
                     b.reposition(pp, ps, mon, above);
                 }
             }
+        }
+    }
+
+    /// 待机：到期按睡意入睡或去散步（输入框打开时原地陪打字，睡意不累积）
+    fn advance_idle(&mut self) {
+        self.tick += 1;
+        if self.tick >= self.state_len {
+            if self.idle_cycles >= 2 {
+                self.state = PetState::Sleep;
+                self.tick = 0;
+            } else if self.input.is_none() {
+                self.idle_cycles += 1;
+                self.enter_walk();
+            } else {
+                self.tick = 0;
+            }
+        }
+    }
+
+    /// 散步：位移 + 撞墙概率爬墙，到期随机切换休息姿势
+    fn advance_walk(&mut self, window: &Window, ui_modal: bool) {
+        self.tick += 1;
+        if !ui_modal {
+            self.pos.0 += self.dir * WALK_STEP;
+            if self.pos.0 < self.mon.x {
+                self.pos.0 = self.mon.x;
+                self.dir = 1;
+                // 撞左墙：概率爬墙
+                if self.mon.h >= 240 && self.rand() % 10 < 4 {
+                    self.pos.0 += WALK_STEP;
+                    self.enter_climb(-1);
+                }
+            } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
+                self.dir = -1;
+                if self.mon.h >= 240 && self.rand() % 10 < 4 {
+                    self.pos.0 -= WALK_STEP;
+                    self.enter_climb(1);
+                }
+            }
+            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+        }
+        if self.tick >= self.state_len {
+            // 随机休息姿势：坐 / 伸懒腰 / 舔毛，小概率去趴窗
+            let roll = self.rand() % 100;
+            if roll <= 9 && self.mon.h >= 240 {
+                self.perch_on_window();
+            } else if roll <= 34 {
+                let t = self.rand_range(6, 14) as u32;
+                self.enter_pose(PetState::Sitting, t, None);
+            } else if roll <= 49 {
+                self.enter_pose(PetState::Stretch, 4, Some("伸个懒腰～"));
+            } else if roll <= 69 {
+                let t = self.rand_range(8, 16) as u32;
+                self.enter_pose(PetState::Groom, t, None);
+            } else {
+                self.enter_idle();
+            }
+        }
+    }
+
+    /// 趴在窗口顶边：跟随目标窗口，到期（或窗口没了）跳下
+    fn advance_perch(&mut self, window: &Window, ui_modal: bool) {
+        self.tick += 1;
+        #[cfg(windows)]
+        if !ui_modal {
+            self.perch_follow();
+        }
+        let done = self.perch.as_ref().map(|(_, _, t)| *t == 0).unwrap_or(true);
+        if done {
+            // 从窗口上跳下来
+            self.perch = None;
+            self.state = PetState::Thrown;
+            self.tick = 0;
+            self.thrown_vel = (0.0, -0.1);
+            self.frame_at = Some(Instant::now() + Duration::from_millis(THROWN_FRAME_MS));
+            return;
+        }
+        if !ui_modal {
+            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+        }
+    }
+
+    /// 爬屏幕边缘：上行 → 顶上挂一会儿 → 下行落地回屏幕内
+    fn advance_climb(&mut self, window: &Window, ui_modal: bool) {
+        self.tick += 1;
+        if let Some(h) = self.hang_until {
+            // 在顶上挂一会儿
+            if Instant::now() >= h {
+                self.hang_until = None;
+                self.climb_vertical = 1;
+            }
+        } else if self.climb_vertical < 0 {
+            self.pos.1 -= CLIMB_STEP;
+            if self.pos.1 <= self.mon.y + 2 {
+                self.pos.1 = self.mon.y + 2;
+                self.hang_until = Some(Instant::now() + Duration::from_millis(1200));
+            }
+        } else {
+            self.pos.1 += CLIMB_STEP;
+            if self.pos.1 >= self.mon_bottom() {
+                self.pos.1 = self.mon_bottom();
+                // 落地后往屏幕里挪，结束爬墙
+                self.pos.0 = if self.climb_wall > 0 {
+                    self.pos.0 - 12
+                } else {
+                    self.pos.0 + 12
+                };
+                self.climb_wall = 0;
+                self.hang_until = None;
+                self.enter_idle();
+            }
+        }
+        if !ui_modal {
+            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+        }
+    }
+
+    /// 被甩飞：抛物线 + 弹跳衰减，落稳后晕一下
+    fn advance_thrown(&mut self, window: &Window, ui_modal: bool) {
+        let dt = THROWN_FRAME_MS as f32;
+        let (mut vx, mut vy) = self.thrown_vel;
+        let mut landed = false;
+        if !ui_modal {
+            self.pos.0 += (vx * dt) as i32;
+            self.pos.1 += (vy * dt) as i32;
+            vy += GRAVITY * dt;
+            if self.pos.0 < self.mon.x {
+                self.pos.0 = self.mon.x;
+                vx = -vx * 0.7;
+            }
+            if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
+                self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
+                vx = -vx * 0.7;
+            }
+            if self.pos.1 < self.mon.y {
+                self.pos.1 = self.mon.y;
+                vy = 0.0;
+            }
+            let floor = self.mon_bottom();
+            if self.pos.1 >= floor {
+                self.pos.1 = floor;
+                vy = -vy * 0.45;
+                vx *= 0.75;
+                if vy.abs() < 0.06 {
+                    vy = 0.0;
+                    landed = true;
+                }
+            }
+            self.thrown_vel = (vx, vy);
+            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+        }
+        if landed {
+            self.resolve_mon();
+            self.enter_idle();
+            self.reaction_end = Some(Instant::now() + Duration::from_millis(700));
+            self.state = PetState::Shocked;
+            self.tick = 0;
+            self.bubble_show("喵呜…晕了");
         }
     }
 
@@ -527,7 +542,7 @@ impl App {
         let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
             b.show(text, self.pos, self.pet_size, self.mon, above);
-            self.bubble_until = Some(Instant::now() + Duration::from_secs(secs.max(2)));
+            self.bubble_until = Some(Instant::now() + Duration::from_secs(secs));
         }
     }
 
