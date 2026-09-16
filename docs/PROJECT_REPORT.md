@@ -266,8 +266,8 @@ deskpet-rs/
 
 | 字段 | 默认 | 说明 |
 |---|---|---|
-| base_url | `https://your-gateway.example/v1` | OpenAI 兼容入口（LiteGate 局域网网关） |
-| api_key | 空 | LiteGate 虚拟密钥；空 = 离线模式；或环境变量 `DESKPET_API_KEY` |
+| base_url |  `https://your-gateway.example/v1` | OpenAI 兼容入口（自建网关，如 LiteGate） |
+| api_key | 空 | 网关虚拟密钥；空 = 离线模式；或环境变量 `DESKPET_API_KEY` |
 | model | `nvidia/nemotron-3-super-120b-a12b:free` | 聊天模型（免费） |
 | vision_model | `deepseek-flash` | 拖图识别模型（免费模型不支持图片输入） |
 | pet_name / system_prompt | 团子 / 小猫人设 | 聊天窗标题与 AI 性格 |

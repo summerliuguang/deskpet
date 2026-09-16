@@ -7,7 +7,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// OpenAI 兼容入口，含 /v1，例如 https://your-gateway.example/v1
+    /// OpenAI 兼容入口，含 /v1（自建网关或任意 OpenAI 兼容服务）
     pub base_url: String,
     pub api_key: String,
     pub model: String,

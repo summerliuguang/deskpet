@@ -1,10 +1,10 @@
 # deskpet 配置示例 —— 把本文件复制一份改名为 deskpet.toml，放在 deskpet.exe 旁边
 # 所有字段都有默认值；api_key 留空 = 离线模式（聊天会提示未接入）
 
-# OpenAI 兼容接口入口（本机 LiteGate 局域网入口；自签证书客户端已自动跳过校验）
+# OpenAI 兼容接口入口（自建网关或任意 OpenAI 兼容服务；自签证书客户端已自动跳过校验）
 base_url = "https://your-gateway.example/v1"
 
-# 虚拟密钥（在 LiteGate 管理台 https://your-gateway.example 签发，sk-lg- 开头）
+# 虚拟密钥（在你的网关管理台签发（本项目使用的虚拟密钥以 sk-lg- 开头为示例））
 # 也可以用环境变量 DESKPET_API_KEY 传入，避免落盘
 api_key = ""
 
