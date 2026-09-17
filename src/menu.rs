@@ -291,52 +291,15 @@ impl MenuWin {
     }
 
     pub fn draw(&mut self) {
+        use crate::ui_draw;
         let total_h = self.total_h;
         let r = self.radius;
-        // 圆角矩形内含判定（所有尺寸用物理宽 self.w，缩放下与缓冲一致）
+        // 圆角内含判定（供分隔线/高亮的裁剪判断；底板与描边走共享原语）
         let inside = |px: i32, py: i32| -> bool {
-            if px < 0 || py < 0 || px >= self.w || py >= total_h {
-                return false;
-            }
-            let (lx, ly) = (px, py);
-            let (rx, ry) = (self.w - 1 - lx, total_h - 1 - ly);
-            for (cx, cy) in [(r, r), (rx, ry), (r, ry), (rx, r)] {
-                if cx < r && cy < r {
-                    let dx = cx - r;
-                    let dy = cy - r;
-                    if dx * dx + dy * dy > r * r {
-                        return false;
-                    }
-                }
-            }
-            true
+            ui_draw::rounded_inside(px, py, self.w, total_h, r)
         };
         let mut buf = vec![0u32; (self.w * total_h) as usize];
-        for y in 0..total_h {
-            for x in 0..self.w {
-                if inside(x, y) {
-                    buf[(y * self.w + x) as usize] = BG;
-                }
-            }
-        }
-        // 1px 内描边（有外侧邻接的内部像素）
-        let mut border = Vec::new();
-        for y in 0..total_h {
-            for x in 0..self.w {
-                if !inside(x, y) {
-                    continue;
-                }
-                let neigh_out = [-1i32, 1].iter().any(|d| {
-                    !inside(x + d, y)
-                }) || [-1i32, 1].iter().any(|d| !inside(x, y + d));
-                if neigh_out {
-                    border.push((x, y));
-                }
-            }
-        }
-        for (x, y) in border {
-            buf[(y * self.w + x) as usize] = BORDER;
-        }
+        ui_draw::rounded_panel(&mut buf, self.w, total_h, r, BG, BORDER);
 
         // 行布局 + select/pressed 底色 + 文本
         self.rows.clear();
@@ -361,17 +324,10 @@ impl MenuWin {
                     let pressed = self.pressed == Some(row);
                     if selected || pressed {
                         let bg = if pressed { PRESSED_BG } else { HOVER_BG };
-                        let pa = (bg >> 24) & 0xFF;
                         for yy in y0.max(r)..(y1 - 1).min(total_h - r) {
                             for x in ui(4)..self.w - ui(4) {
                                 let px = buf[(yy * self.w + x) as usize];
-                                let mixch = |sc: u32, dc: u32| -> u32 {
-                                    (sc * pa + dc * (255 - pa)) / 255
-                                };
-                                buf[(yy * self.w + x) as usize] = 0xFF000000
-                                    | (mixch((bg >> 16) & 0xFF, (px >> 16) & 0xFF) << 16)
-                                    | (mixch((bg >> 8) & 0xFF, (px >> 8) & 0xFF) << 8)
-                                    | mixch(bg & 0xFF, px & 0xFF);
+                                buf[(yy * self.w + x) as usize] = ui_draw::blend(px, bg);
                             }
                         }
                     }

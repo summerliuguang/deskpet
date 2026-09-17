@@ -10,6 +10,7 @@ pub mod sprites;
 pub mod text;
 pub mod todo;
 pub mod tts;
+pub mod ui_draw;
 
 /// 事件循环用户事件
 #[derive(Debug, Clone)]

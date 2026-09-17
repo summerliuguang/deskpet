@@ -39,6 +39,67 @@ impl Default for Config {
     }
 }
 
+/// 行为开关清单——**新增字段只改这一处**：Default/parse/persist_toggles
+/// 三处代码由宏自动生成（此前要手改三处，漏一处即静默丢配置）。
+/// 类型分支：bool / u64 / opt_i64 / opt_usize；第 3 列是默认值（opt 用 none）。
+macro_rules! for_each_setting {
+    ($m:ident) => {
+        $m! {
+            (voice, bool, true)
+            (pos_x, opt_i64, none)
+            (pos_y, opt_i64, none)
+            (model_kind, opt_usize, none)
+            (drink_minutes, u64, 45)
+            (sit_minutes, u64, 90)
+            (keyboard_link, bool, true)
+            (gamepad_link, bool, true)
+            (gaze_follow, bool, true)
+            (follow_mouse, bool, false)
+            (whisper_on, bool, true)
+            (quiet, bool, false)
+            (onboarded, bool, false)
+            (hotkeys, bool, true)
+            (typewriter, bool, true)
+            (chat_log, bool, true)
+        }
+    };
+}
+pub(crate) use for_each_setting;
+
+macro_rules! setting_default {
+    (bool, $d:expr) => { $d };
+    (u64, $d:expr) => { $d };
+    (opt_i64, none) => { None };
+    (opt_usize, none) => { None };
+}
+
+macro_rules! default_fields {
+    ($(($name:ident, $ty:ident, $d:expr))*) => {
+        Self { $( $name: setting_default!($ty, $d) ),* }
+    };
+}
+
+macro_rules! parse_setting_value {
+    ($v:ident, $name:ident, bool, $d:expr) => {
+        $v.get(stringify!($name)).and_then(|x| x.as_bool()).unwrap_or($d)
+    };
+    ($v:ident, $name:ident, u64, $d:expr) => {
+        $v.get(stringify!($name)).and_then(|x| x.as_integer()).map(|x| x as u64).unwrap_or($d)
+    };
+    ($v:ident, $name:ident, opt_i64, none) => {
+        $v.get(stringify!($name)).and_then(|x| x.as_integer()).map(|x| x as i64)
+    };
+    ($v:ident, $name:ident, opt_usize, none) => {
+        $v.get(stringify!($name)).and_then(|x| x.as_integer()).map(|x| x as usize)
+    };
+}
+
+macro_rules! parse_fields {
+    ($(($name:ident, $ty:ident, $d:expr))*) => {
+        Self { $( $name: parse_setting_value!(v, $name, $ty, $d) ),* }
+    };
+}
+
 /// 行为开关（运行时可变，菜单"设置"页持久化）
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -69,24 +130,7 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Self {
-            voice: true,
-            pos_x: None,
-            pos_y: None,
-            model_kind: None,
-            drink_minutes: 45,
-            sit_minutes: 90,
-            keyboard_link: true,
-            gamepad_link: true,
-            gaze_follow: true,
-            follow_mouse: false,
-            whisper_on: true,
-            quiet: false,
-            onboarded: false,
-            hotkeys: true,
-            typewriter: true,
-            chat_log: true,
-        }
+        for_each_setting!(default_fields)
     }
 }
 
@@ -95,27 +139,7 @@ impl Settings {
         let Ok(v) = text.parse::<toml::Value>() else {
             return Self::default();
         };
-        let b = |k: &str, d: bool| v.get(k).and_then(|x| x.as_bool()).unwrap_or(d);
-        let u = |k: &str, d: u64| v.get(k).and_then(|x| x.as_integer()).map(|x| x as u64).unwrap_or(d);
-        let i64opt = |k: &str| v.get(k).and_then(|x| x.as_integer()).map(|x| x as i64);
-        Self {
-            pos_x: i64opt("pos_x"),
-            pos_y: i64opt("pos_y"),
-            model_kind: v.get("model_kind").and_then(|x| x.as_integer()).map(|x| x as usize),
-            voice: b("voice", true),
-            drink_minutes: u("drink_minutes", 45),
-            sit_minutes: u("sit_minutes", 90),
-            keyboard_link: b("keyboard_link", true),
-            gamepad_link: b("gamepad_link", true),
-            gaze_follow: b("gaze_follow", true),
-            follow_mouse: b("follow_mouse", false),
-            whisper_on: b("whisper_on", true),
-            quiet: b("quiet", false),
-            onboarded: b("onboarded", false),
-            hotkeys: b("hotkeys", true),
-            typewriter: b("typewriter", true),
-            chat_log: b("chat_log", true),
-        }
+        for_each_setting!(parse_fields)
     }
 }
 

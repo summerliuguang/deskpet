@@ -62,6 +62,110 @@ struct PressInfo {
     moved: bool,
 }
 
+/// 定时任务种类（每种一个槽位）
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Deadline {
+    /// 气泡到期隐藏
+    BubbleHide,
+    /// 反应表情（摸头/惊吓/手柄）结束
+    ReactionEnd,
+    /// 随机碎碎念
+    Whisper,
+    /// 爬墙顶上挂一会儿
+    Hang,
+    /// 喝水提醒
+    Drink,
+    /// 久坐提醒
+    Sit,
+    /// 周期保存会话（recur 300s）
+    Autosave,
+    /// 待办截止轮询（recur 20s）
+    DueCheck,
+    /// 启动消息（配置诊断/首次引导）
+    Onboard,
+    /// 思考中省略号动画（recur 350ms）
+    Think,
+}
+
+/// 统一定时器：此前 10 个 Option<Instant> 各要手改 4 处
+/// （字段/构造/next_wakeup/about_to_wait），漏掉 next_wakeup 就是
+/// 事件循环睡死的静默 bug——现在只加枚举项 + fire 分支 + set 调用。
+struct Timers {
+    /// 每类一个槽：时刻 + 周期（Some = 触发后自动顺延，防积压从 now 起算）
+    slots: [Option<(Instant, Option<Duration>)>; 10],
+}
+
+impl Timers {
+    fn new() -> Self {
+        Self { slots: [None; 10] }
+    }
+
+    fn set(&mut self, d: Deadline, at: Instant) {
+        self.slots[d as usize] = Some((at, None));
+    }
+
+    fn set_recur(&mut self, d: Deadline, first: Instant, period: Duration) {
+        self.slots[d as usize] = Some((first, Some(period)));
+    }
+
+    fn cancel(&mut self, d: Deadline) {
+        self.slots[d as usize] = None;
+    }
+
+    fn is_set(&self, d: Deadline) -> bool {
+        self.slots[d as usize].is_some()
+    }
+
+    fn get(&self, d: Deadline) -> Option<Instant> {
+        self.slots[d as usize].map(|(t, _)| t)
+    }
+
+    /// 取出最早到期任务；recur 自动顺延到未来（单次自动清槽）
+    fn pop_due(&mut self, now: Instant) -> Option<Deadline> {
+        let mut best: Option<(Instant, usize)> = None;
+        for (i, slot) in self.slots.iter().enumerate() {
+            if let Some((at, _)) = slot {
+                if *at <= now && best.map(|(bt, _)| *at < bt).unwrap_or(true) {
+                    best = Some((*at, i));
+                }
+            }
+        }
+        let (_, i) = best?;
+        let (at, recur) = self.slots[i].unwrap();
+        match recur {
+            Some(period) => {
+                let mut next = at + period;
+                while next <= now {
+                    next += period;
+                }
+                self.slots[i] = Some((next, Some(period)));
+            }
+            None => self.slots[i] = None,
+        }
+        Some(match i {
+            0 => Deadline::BubbleHide,
+            1 => Deadline::ReactionEnd,
+            2 => Deadline::Whisper,
+            3 => Deadline::Hang,
+            4 => Deadline::Drink,
+            5 => Deadline::Sit,
+            6 => Deadline::Autosave,
+            7 => Deadline::DueCheck,
+            8 => Deadline::Onboard,
+            _ => Deadline::Think,
+        })
+    }
+
+    /// 全部未来时刻（供 next_wakeup 汇总）
+    fn iter_times(&self) -> impl Iterator<Item = Instant> + '_ {
+        let now = Instant::now();
+        self.slots
+            .iter()
+            .filter_map(|s| s.map(|(t, _)| t))
+            .filter(move |t| *t > now)
+    }
+}
+
 /// 模型来源
 #[derive(Clone)]
 pub enum ModelSource {
@@ -101,11 +205,9 @@ struct App {
     hidden: bool,
 
     frame_at: Option<Instant>,
-    bubble_until: Option<Instant>,
-    reaction_end: Option<Instant>,
-    whisper_at: Option<Instant>,
+    /// 统一定时器（气泡/反应/碎碎念/挂墙/提醒/周期任务）
+    timers: Timers,
     typing_until: Option<Instant>,
-    hang_until: Option<Instant>,
     press: Option<PressInfo>,
     press_cursor: (f64, f64),
     drag_origin: (i32, i32),
@@ -125,20 +227,11 @@ struct App {
     /// AI 对话历史（气泡模式无历史 UI，但上下文保留在内存）
     chat_history: Vec<ChatMsg>,
     chat_pending: bool,
-    think_next: Option<Instant>,
     think_frame: u32,
     /// 趴窗状态：(窗口句柄地址, 相对窗口左缘的偏移, 剩余 tick)
     perch: Option<(isize, i32, u32)>,
-    drink_at: Option<Instant>,
-    sit_at: Option<Instant>,
-    /// 定期保存会话（防断电/崩溃丢位置）
-    autosave_at: Instant,
-    /// 待办截止轮询时刻
-    due_check_at: Instant,
     /// 启动诊断提示（配置文件问题），resumed 后弹一次
     startup_diag: Option<String>,
-    /// 首次引导气泡显示时刻
-    onboard_at: Option<Instant>,
     /// --selftest 冒烟模式：创建全部窗口渲染一帧后自动退出
     selftest: bool,
     /// 冒烟模式中已完成渲染探活的窗口
@@ -175,11 +268,8 @@ impl App {
             mons: vec![MonRect { x: 0, y: 0, w: 1280, h: 720 }],
             hidden: false,
             frame_at: None,
-            bubble_until: None,
-            reaction_end: None,
-            whisper_at: None,
+            timers: Timers::new(),
             typing_until: None,
-            hang_until: None,
             press: None,
             press_cursor: (0.0, 0.0),
             drag_origin: (0, 0),
@@ -193,15 +283,9 @@ impl App {
             rng: 0x9E3779B97F4A7C15,
             chat_history: Vec::new(),
             chat_pending: false,
-            think_next: None,
             think_frame: 0,
             perch: None,
-            drink_at: None,
-            sit_at: None,
-            autosave_at: Instant::now() + Duration::from_secs(300),
-            due_check_at: Instant::now() + Duration::from_secs(20),
             startup_diag,
-            onboard_at: None,
             selftest: false,
             selftest_seen: Vec::new(),
             selftest_deadline: None,
@@ -227,26 +311,29 @@ impl App {
 
     // ---------- 状态机 ----------
 
-    fn enter_idle(&mut self) {
-        if self.state != PetState::Idle {
+    /// 状态切换唯一入口：统一重置 tick 与状态时长；Idle 睡意计数按原语义
+    /// 维护（重进 Idle 清零）。瞬态计时（frame_at/reaction_end/hang_until）
+    /// 由调用方按需清理——这里刻意不碰。
+    fn transition(&mut self, next: PetState, len_ticks: u32) {
+        if next == PetState::Idle && self.state != PetState::Idle {
             self.idle_cycles = 0;
         }
-        self.state = PetState::Idle;
+        self.state = next;
         self.tick = 0;
-        self.state_len = self.rand_range(30, 90) as u32;
+        self.state_len = len_ticks;
+    }
+
+    fn enter_idle(&mut self) {
+        self.transition(PetState::Idle, self.rand_range(30, 90) as u32);
     }
 
     fn enter_walk(&mut self) {
-        self.state = PetState::Walk;
-        self.tick = 0;
-        self.state_len = self.rand_range(20, 60) as u32;
+        self.transition(PetState::Walk, self.rand_range(20, 60) as u32);
         self.dir = if self.rand() % 2 == 0 { 1 } else { -1 };
     }
 
     fn enter_pose(&mut self, state: PetState, ticks: u32, msg: Option<&str>) {
-        self.state = state;
-        self.tick = 0;
-        self.state_len = ticks;
+        self.transition(state, ticks);
         self.frame_at = None;
         if let Some(m) = msg {
             self.bubble_show(m);
@@ -257,27 +344,27 @@ impl App {
     }
 
     fn enter_climb(&mut self, wall: i32) {
-        self.state = PetState::Climb;
-        self.tick = 0;
+        let len = self.state_len; // 爬墙不判时长，保持旧值即可
+        self.transition(PetState::Climb, len);
         self.climb_wall = wall;
         self.climb_vertical = -1;
-        self.hang_until = None;
+        self.timers.cancel(Deadline::Hang);
         self.bubble_show("爬墙咯！");
     }
 
     fn enter_sleep_by_bubble(&mut self, msg: &str) {
+        let len = self.state_len; // Sleep 不判时长
         self.bubble_show(msg);
-        self.state = PetState::Sleep;
-        self.tick = 0;
+        self.transition(PetState::Sleep, len);
         self.frame_at = None;
-        self.reaction_end = None;
-        self.hang_until = None;
+        self.timers.cancel(Deadline::ReactionEnd);
+        self.timers.cancel(Deadline::Hang);
     }
 
     fn wake_with(&mut self, msg: &str) {
         self.enter_idle();
-        self.reaction_end = None;
-        self.hang_until = None;
+        self.timers.cancel(Deadline::ReactionEnd);
+        self.timers.cancel(Deadline::Hang);
         self.frame_at = None;
         self.bubble_show(msg);
     }
@@ -341,7 +428,7 @@ impl App {
             }
         }
         // 气泡跟随宠物移动（散步/爬墙/飞出/趴窗跟随），不再留在原地指向旧位置
-        if self.bubble_until.is_some() || self.chat_pending {
+        if self.timers.is_set(Deadline::BubbleHide) || self.chat_pending {
             let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
             if let Some(b) = &mut self.bubble {
                 if b.is_visible() {
@@ -356,8 +443,7 @@ impl App {
         self.tick += 1;
         if self.tick >= self.state_len {
             if self.idle_cycles >= 2 {
-                self.state = PetState::Sleep;
-                self.tick = 0;
+                self.transition(PetState::Sleep, 0);
             } else if self.input.is_none() {
                 self.idle_cycles += 1;
                 self.enter_walk();
@@ -420,8 +506,7 @@ impl App {
         if done {
             // 从窗口上跳下来
             self.perch = None;
-            self.state = PetState::Thrown;
-            self.tick = 0;
+            self.transition(PetState::Thrown, 0);
             self.thrown_vel = (0.0, -0.1);
             self.frame_at = Some(Instant::now() + Duration::from_millis(THROWN_FRAME_MS));
             return;
@@ -434,17 +519,13 @@ impl App {
     /// 爬屏幕边缘：上行 → 顶上挂一会儿 → 下行落地回屏幕内
     fn advance_climb(&mut self, window: &Window, ui_modal: bool) {
         self.tick += 1;
-        if let Some(h) = self.hang_until {
-            // 在顶上挂一会儿
-            if Instant::now() >= h {
-                self.hang_until = None;
-                self.climb_vertical = 1;
-            }
+        if self.timers.is_set(Deadline::Hang) {
+            // 在顶上挂一会儿（到期由 Deadline::Hang fire 解除）
         } else if self.climb_vertical < 0 {
             self.pos.1 -= CLIMB_STEP;
             if self.pos.1 <= self.mon.y + 2 {
                 self.pos.1 = self.mon.y + 2;
-                self.hang_until = Some(Instant::now() + Duration::from_millis(1200));
+                self.timers.set(Deadline::Hang, Instant::now() + Duration::from_millis(1200));
             }
         } else {
             self.pos.1 += CLIMB_STEP;
@@ -457,7 +538,7 @@ impl App {
                     self.pos.0 + 12
                 };
                 self.climb_wall = 0;
-                self.hang_until = None;
+                self.timers.cancel(Deadline::Hang);
                 self.enter_idle();
             }
         }
@@ -503,9 +584,8 @@ impl App {
         if landed {
             self.resolve_mon();
             self.enter_idle();
-            self.reaction_end = Some(Instant::now() + Duration::from_millis(700));
-            self.state = PetState::Shocked;
-            self.tick = 0;
+            self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(700));
+            self.transition(PetState::Shocked, 0);
             self.bubble_show("喵呜…晕了");
         }
     }
@@ -537,20 +617,13 @@ impl App {
         let typing_tick = self.bubble.as_ref().and_then(|b| b.next_tick_at());
         [
             self.frame_at,
-            self.bubble_until,
-            self.reaction_end,
-            self.whisper_at,
             self.typing_until,
-            self.hang_until,
-            self.drink_at,
-            self.sit_at,
-            Some(self.autosave_at),
-            self.onboard_at,
             typing_tick,
             press_deadline,
         ]
         .into_iter()
         .flatten()
+        .chain(self.timers.iter_times())
         .filter(|t| *t > now)
         .min()
     }
@@ -576,14 +649,16 @@ impl App {
         let secs = (2 + text.chars().count() as u64 / 6).min(8);
         let above = self.bubble_above();
         if let Some(b) = &mut self.bubble {
+            let hide_at = Instant::now();
             if self.settings.typewriter {
                 b.show(text, self.pos, self.pet_size, self.mon, above);
                 // 显示时长要覆盖打字过程
                 let typing = b.typing_remaining().as_secs() as u64 + 1;
-                self.bubble_until = Some(Instant::now() + Duration::from_secs(secs.max(typing + 2)));
+                self.timers
+                    .set(Deadline::BubbleHide, hide_at + Duration::from_secs(secs.max(typing + 2)));
             } else {
                 b.show_now(text, self.pos, self.pet_size, self.mon, above);
-                self.bubble_until = Some(Instant::now() + Duration::from_secs(secs));
+                self.timers.set(Deadline::BubbleHide, hide_at + Duration::from_secs(secs));
             }
         }
     }
@@ -597,11 +672,11 @@ impl App {
         if let Some(b) = &mut self.bubble {
             b.show_now(text, self.pos, self.pet_size, self.mon, above);
         }
-        self.bubble_until = None;
+        self.timers.cancel(Deadline::BubbleHide);
     }
 
     fn bubble_hide(&mut self) {
-        self.bubble_until = None;
+        self.timers.cancel(Deadline::BubbleHide);
         if let Some(b) = &mut self.bubble {
             b.hide();
         }
@@ -637,8 +712,7 @@ impl App {
     }
 
     fn begin_drag(&mut self) {
-        self.state = PetState::Dragged;
-        self.tick = 0;
+        self.transition(PetState::Dragged, 0);
         self.drag_origin = self.pos;
         // 按下时窗口未动：本地坐标 == 全局抓取偏移，拖动全程锚定它
         self.grab = self.cursor;
@@ -685,7 +759,7 @@ impl App {
             let speed = (vx * vx + vy * vy).sqrt();
             if speed > FLING_SPEED_MIN {
                 // 甩飞！
-                self.state = PetState::Thrown;
+                self.transition(PetState::Thrown, 0);
                 self.thrown_vel = (
                     vx.clamp(-1.3, 1.3),
                     vy.clamp(-1.3, 1.3) - 0.25, // 甩出时带点向上
@@ -729,9 +803,8 @@ impl App {
         } else {
             ("喵嗷！踩到脚了！", 900)
         };
-        self.state = if y < 20 { PetState::Patted } else { PetState::Shocked };
-        self.tick = 0;
-        self.reaction_end = Some(Instant::now() + Duration::from_millis(dur));
+        self.transition(if y < 20 { PetState::Patted } else { PetState::Shocked }, 0);
+        self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(dur));
         self.frame_at = None;
         self.bubble_show(msg);
         if let Some(w) = &self.window {
@@ -752,7 +825,7 @@ impl App {
         if self.settings.whisper_on
             && !self.settings.quiet
             && self.state == PetState::Idle
-            && self.bubble_until.is_none()
+            && !self.timers.is_set(Deadline::BubbleHide)
             && !self.chat_pending
             && !self.hidden
         {
@@ -762,7 +835,8 @@ impl App {
                 w.request_redraw();
             }
         }
-        self.whisper_at = Some(Instant::now() + Duration::from_secs(self.rand_range(50, 140)));
+        self.timers
+            .set(Deadline::Whisper, Instant::now() + Duration::from_secs(self.rand_range(50, 140)));
     }
 
     // ---------- 绘制 ----------
@@ -868,7 +942,7 @@ impl App {
         }
         self.chat_pending = true;
         self.think_frame = 0;
-        self.think_next = Some(Instant::now() + Duration::from_millis(350));
+        self.timers.set_recur(Deadline::Think, Instant::now() + Duration::from_millis(350), Duration::from_millis(350));
         match history {
             Some(h) => {
                 // 思考中：头顶冒省略号跳动文字泡
@@ -907,7 +981,7 @@ impl App {
             }
             None => {
                 self.chat_pending = false;
-                self.think_next = None;
+                self.timers.cancel(Deadline::Think);
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: "还没接入 AI".into(), image: None });
                 self.trim_history();
@@ -1296,38 +1370,48 @@ impl App {
     }
 
     fn persist_toggles(&self) {
-        let st = &self.settings;
-        deskpet::config::persist_settings(&[
-            ("voice".into(), toml::Value::Boolean(st.voice)),
-            ("drink_minutes".into(), toml::Value::Integer(st.drink_minutes as i64)),
-            ("sit_minutes".into(), toml::Value::Integer(st.sit_minutes as i64)),
-            ("keyboard_link".into(), toml::Value::Boolean(st.keyboard_link)),
-            ("gamepad_link".into(), toml::Value::Boolean(st.gamepad_link)),
-            ("gaze_follow".into(), toml::Value::Boolean(st.gaze_follow)),
-            ("follow_mouse".into(), toml::Value::Boolean(st.follow_mouse)),
-            ("whisper_on".into(), toml::Value::Boolean(st.whisper_on)),
-            ("quiet".into(), toml::Value::Boolean(st.quiet)),
-            ("onboarded".into(), toml::Value::Boolean(st.onboarded)),
-            ("hotkeys".into(), toml::Value::Boolean(st.hotkeys)),
-            ("typewriter".into(), toml::Value::Boolean(st.typewriter)),
-            ("chat_log".into(), toml::Value::Boolean(st.chat_log)),
-        ]);
+        // 开关清单由 for_each_setting 宏维护（与 Default/parse 同源；
+        // opt 字段不持久化——pos/model_kind 由 save_session 按语义单独写）
+        macro_rules! persist_fields {
+            ($(($name:ident, $ty:ident, $d:expr))*) => {{
+                let st = &self.settings;
+                #[allow(unused_mut)]
+                let mut pairs: Vec<(String, toml::Value)> = Vec::new();
+                macro_rules! persist_one {
+                    ($pairs:ident, $st:ident, $n:ident, bool, $d:expr) => {
+                        $pairs.push((stringify!($n).into(), toml::Value::Boolean($st.$n)));
+                    };
+                    ($pairs:ident, $st:ident, $n:ident, u64, $d:expr) => {
+                        $pairs.push((stringify!($n).into(), toml::Value::Integer($st.$n as i64)));
+                    };
+                    ($pairs:ident, $st:ident, $n:ident, opt_i64, none) => {};
+                    ($pairs:ident, $st:ident, $n:ident, opt_usize, none) => {};
+                }
+                $(
+                    persist_one!(pairs, st, $name, $ty, $d);
+                )*
+                deskpet::config::persist_settings(&pairs);
+            }};
+        }
+        deskpet::config::for_each_setting!(persist_fields);
     }
 
     // ---------- 提醒 ----------
 
     fn arm_reminders(&mut self) {
         let now = Instant::now();
-        self.drink_at = if self.settings.drink_minutes > 0 {
-            Some(now + Duration::from_secs(self.settings.drink_minutes * 60))
+        if self.settings.drink_minutes > 0 {
+            self.timers
+                .set(Deadline::Drink, now + Duration::from_secs(self.settings.drink_minutes * 60));
         } else {
-            None
-        };
-        self.sit_at = if self.settings.sit_minutes > 0 {
-            Some(now + Duration::from_secs(self.settings.sit_minutes * 60))
+            self.timers.cancel(Deadline::Drink);
+        }
+        if self.settings.sit_minutes > 0 {
+            self.timers
+                .set(Deadline::Sit, now + Duration::from_secs(self.settings.sit_minutes * 60));
         } else {
-            None
-        };
+            self.timers.cancel(Deadline::Sit);
+        }
     }
 
     fn fire_reminder(&mut self, drink: bool) {
@@ -1342,9 +1426,8 @@ impl App {
             return;
         }
         if self.state != PetState::Sleep {
-            self.state = PetState::Patted;
-            self.tick = 0;
-            self.reaction_end = Some(Instant::now() + Duration::from_millis(1500));
+            self.transition(PetState::Patted, 0);
+            self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(1500));
         }
         self.bubble_show(msg);
         let cfg = self.cfg.clone();
@@ -1398,12 +1481,50 @@ impl App {
         }
     }
 
+    // ---------- 派生窗口统一操作（新增窗口只需在这三个方法里登记） ----------
+
+    /// 全屏遮挡/快捷键隐藏：收起全部派生窗口
+    fn hide_derived(&mut self) {
+        self.menu = None;
+        self.bubble_hide();
+        if let Some(i) = &self.input {
+            i.window.set_visible(false);
+        }
+        if let Some(t) = &self.todo {
+            t.window.set_visible(false);
+        }
+    }
+
+    /// 从隐藏恢复：重开派生窗口
+    fn restore_derived(&mut self) {
+        if let Some(i) = &self.input {
+            i.window.set_visible(true);
+        }
+        if let Some(t) = &self.todo {
+            t.window.set_visible(true);
+        }
+    }
+
+    /// UI 缩放热切换：气泡按新字号重建，输入框/待办/菜单关闭待重开
+    fn rebuild_derived_for_scale(&mut self, el: &ActiveEventLoop) {
+        self.menu = None;
+        self.bubble_hide();
+        self.bubble = BubbleWin::create(el);
+        if let Some(i) = &self.input {
+            i.window.set_visible(false);
+        }
+        self.input = None;
+        if let Some(t) = &self.todo {
+            t.window.set_visible(false);
+        }
+        self.todo = None;
+    }
+
     fn set_hidden(&mut self, el: &ActiveEventLoop, hide: bool) {
         self.hidden = hide;
         let Some(w) = &self.window else { return };
         w.set_visible(!hide);
         if hide {
-            self.menu = None;
             // 瞬态状态立即落地，避免隐藏期间动画停摆、恢复后冻结
             self.press = None;
             if matches!(
@@ -1413,27 +1534,16 @@ impl App {
                 self.perch = None;
                 self.pos.1 = self.mon_bottom();
                 w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                self.hang_until = None;
+                self.timers.cancel(Deadline::Hang);
                 self.climb_wall = 0;
                 self.enter_idle();
             }
-            self.bubble_hide();
-            if let Some(i) = &self.input {
-                i.window.set_visible(false);
-            }
-            if let Some(t) = &self.todo {
-                t.window.set_visible(false);
-            }
+            self.hide_derived();
             self.frame_at = None;
             self.typing_until = None;
             el.set_control_flow(ControlFlow::Wait);
         } else {
-            if let Some(i) = &self.input {
-                i.window.set_visible(true);
-            }
-            if let Some(t) = &self.todo {
-                t.window.set_visible(true);
-            }
+            self.restore_derived();
             w.request_redraw();
         }
     }
@@ -1550,13 +1660,18 @@ impl ApplicationHandler<PetEvent> for App {
             if self.bubble.is_some() { "OK" } else { "创建失败" }
         ));
 
-        self.whisper_at = Some(Instant::now() + Duration::from_secs(25));
+        self.timers.set(Deadline::Whisper, Instant::now() + Duration::from_secs(25));
         self.arm_reminders();
         // 启动延迟消息：配置问题提示优先，否则首次运行引导（引导只出现一次）
         if !self.settings.onboarded || self.startup_diag.is_some() {
             let delay = if self.startup_diag.is_some() { 800 } else { 2500 };
-            self.onboard_at = Some(Instant::now() + Duration::from_millis(delay));
+            self.timers.set(Deadline::Onboard, Instant::now() + Duration::from_millis(delay));
         }
+        // 周期任务：会话保存 / 待办截止轮询
+        self.timers
+            .set_recur(Deadline::Autosave, Instant::now() + Duration::from_secs(300), Duration::from_secs(300));
+        self.timers
+            .set_recur(Deadline::DueCheck, Instant::now() + Duration::from_secs(20), Duration::from_secs(20));
 
         #[cfg(windows)]
         {
@@ -1801,17 +1916,7 @@ impl ApplicationHandler<PetEvent> for App {
                     );
                 }
                 // 派生 UI 关闭/重建，重开时按新缩放
-                self.menu = None;
-                self.bubble_hide();
-                self.bubble = BubbleWin::create(el); // 气泡按新字号重建
-                if let Some(i) = &self.input {
-                    i.window.set_visible(false);
-                    self.input = None;
-                }
-                if let Some(t) = &self.todo {
-                    t.window.set_visible(false);
-                    self.todo = None;
-                }
+                self.rebuild_derived_for_scale(el);
                 window.request_redraw();
                 dlog(&format!("缩放变化 → {scale_factor:.2}"));
             }
@@ -1857,7 +1962,7 @@ impl ApplicationHandler<PetEvent> for App {
             }
             PetEvent::ChatReply(r) => {
                 self.chat_pending = false;
-                self.think_next = None;
+                self.timers.cancel(Deadline::Think);
                 let reply = match r {
                     Ok(t) => t,
                     Err(e) => format!("出错了：{e}"),
@@ -1896,9 +2001,8 @@ impl ApplicationHandler<PetEvent> for App {
                     && self.state != PetState::Dragged
                     && self.state != PetState::Thrown
                 {
-                    self.state = PetState::Patted;
-                    self.tick = 0;
-                    self.reaction_end = Some(Instant::now() + Duration::from_millis(800));
+                    self.transition(PetState::Patted, 0);
+                    self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(800));
                     self.frame_at = None;
                     let i = (self.rand() % PAD_REACTIONS.len() as u64) as usize;
                     self.bubble_show(PAD_REACTIONS[i]);
@@ -1909,6 +2013,66 @@ impl ApplicationHandler<PetEvent> for App {
             }
         }
         self.schedule(el);
+    }
+
+    /// 统一定时器分发：每种 Deadline 的到期动作（逻辑自原 about_to_wait 各段原样迁移）
+    fn fire_deadline(&mut self, el: &ActiveEventLoop, kind: Deadline) {
+        match kind {
+            Deadline::BubbleHide => self.bubble_hide(),
+            Deadline::ReactionEnd => {
+                if self.state == PetState::Patted || self.state == PetState::Shocked {
+                    self.enter_idle();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            Deadline::Whisper => self.whisper(),
+            Deadline::Hang => {
+                if self.state == PetState::Climb {
+                    self.climb_vertical = 1;
+                    self.frame_at = Some(Instant::now() + Duration::from_millis(180));
+                }
+            }
+            Deadline::Drink => self.fire_reminder(true),
+            Deadline::Sit => self.fire_reminder(false),
+            Deadline::Autosave => self.save_session(),
+            Deadline::DueCheck => {
+                // 清单开着时查到期项，气泡提醒一次
+                if let Some(todo) = &mut self.todo {
+                    if let Some(text) = todo.poll_due() {
+                        if !self.hidden && !self.settings.quiet {
+                            self.bubble_show(&format!("叮咚！待办到期：{text}"));
+                        }
+                    }
+                }
+            }
+            Deadline::Onboard => {
+                if let Some(diag) = self.startup_diag.take() {
+                    self.bubble_show(&diag);
+                } else if !self.settings.onboarded {
+                    self.settings.onboarded = true;
+                    self.persist_toggles();
+                    self.bubble_show("右键我打开菜单喵！长按拖动、双击睡觉，拖张图片给我看看～");
+                }
+            }
+            Deadline::Think => {
+                if !self.chat_pending {
+                    self.timers.cancel(Deadline::Think);
+                    return;
+                }
+                self.think_frame = (self.think_frame + 1) % 3;
+                let dots = format!(
+                    "{}{}",
+                    "·".repeat(self.think_frame as usize + 1),
+                    " ".repeat(2 - self.think_frame as usize)
+                );
+                let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
+                if let Some(b) = &mut self.bubble {
+                    b.show_now(&dots, pp, ps, mon, above);
+                }
+            }
+        }
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
@@ -1937,11 +2101,9 @@ impl ApplicationHandler<PetEvent> for App {
                 self.begin_drag();
             }
         }
-        // 气泡到期
-        if let Some(t) = self.bubble_until {
-            if now >= t {
-                self.bubble_hide();
-            }
+        // 统一定时器：到期任务逐个 fire（fire 内可能设置新任务）
+        while let Some(kind) = self.timers.pop_due(now) {
+            self.fire_deadline(el, kind);
         }
         // 打字机气泡逐字推进
         if let Some(b) = &mut self.bubble {
@@ -1951,26 +2113,6 @@ impl ApplicationHandler<PetEvent> for App {
                 }
             }
         }
-        // 反应表情结束
-        if let Some(t) = self.reaction_end {
-            if now >= t
-                && (self.state == PetState::Patted
-                    || self.state == PetState::Shocked)
-            {
-                self.enter_idle();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-        }
-        // 爬墙顶上挂完
-        if let Some(t) = self.hang_until {
-            if now >= t && self.state == PetState::Climb {
-                self.hang_until = None;
-                self.climb_vertical = 1;
-                self.frame_at = Some(now + Duration::from_millis(180));
-            }
-        }
         // 动画帧到期
         if let Some(t) = self.frame_at {
             if now >= t {
@@ -1978,69 +2120,6 @@ impl ApplicationHandler<PetEvent> for App {
                 if let Some(w) = &self.window {
                     w.request_redraw();
                 }
-            }
-        }
-        // 思考中省略号动画
-        if self.chat_pending {
-            if let Some(t) = self.think_next {
-                if now >= t {
-                    self.think_frame = (self.think_frame + 1) % 3;
-                    self.think_next = Some(now + Duration::from_millis(350));
-                    let dots = format!("{}{}", "·".repeat(self.think_frame as usize + 1), " ".repeat(2 - self.think_frame as usize));
-                    let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
-                    if let Some(b) = &mut self.bubble {
-                        b.show_now(&dots, pp, ps, mon, above);
-                    }
-                }
-            }
-        }
-        // 随机碎碎念
-        if let Some(t) = self.whisper_at {
-            if now >= t {
-                self.whisper_at = None;
-                self.whisper();
-            }
-        }
-        // 启动消息：配置问题 / 首次引导
-        if let Some(t) = self.onboard_at {
-            if now >= t {
-                self.onboard_at = None;
-                if let Some(diag) = self.startup_diag.take() {
-                    self.bubble_show(&diag);
-                } else if !self.settings.onboarded {
-                    self.settings.onboarded = true;
-                    self.persist_toggles();
-                    self.bubble_show("右键我打开菜单喵！长按拖动、双击睡觉，拖张图片给我看看～");
-                }
-            }
-        }
-        // 周期保存会话（防崩溃/断电丢位置与开关）
-        if now >= self.autosave_at {
-            self.save_session();
-            self.autosave_at = now + Duration::from_secs(300);
-        }
-        // 待办截止轮询：清单开着时每 20 秒查一次到期项，气泡提醒一次
-        if now >= self.due_check_at {
-            self.due_check_at = now + Duration::from_secs(20);
-            if let Some(todo) = &mut self.todo {
-                if let Some(text) = todo.poll_due() {
-                    if !self.hidden && !self.settings.quiet {
-                        self.bubble_show(&format!("叮咚！待办到期：{text}"));
-                    }
-                }
-            }
-        }
-        // 喝水/久坐提醒
-        if let Some(t) = self.drink_at {
-            if now >= t {
-                self.drink_at = None;
-                self.fire_reminder(true);
-            }
-        }
-        if let Some(t) = self.sit_at {
-            if now >= t {
-                self.sit_at = None;
-                self.fire_reminder(false);
             }
         }
         // 冒烟模式：全部窗口渲染到位 → 通过退出；超时 → 失败退出

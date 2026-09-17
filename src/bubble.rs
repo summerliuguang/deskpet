@@ -224,18 +224,11 @@ impl BubbleWin {
         let tail_y0 = if self.above { h - 7 } else { 0 };
         let body_y0 = if self.above { 0 } else { 7 };
         let body_y1 = if self.above { h - 7 } else { h };
-        // 圆角矩形主体 + 边框
+        // 圆角矩形主体 + 边框（横带平移到局部坐标，r=3 与原圆角公式等价）
+        let bh = body_y1 - body_y0;
         for y in body_y0..body_y1 {
             for x in 0..w {
-                let corner = |cx: i32, cy: i32| -> bool {
-                    let (dx, dy) = (x - cx, y - cy);
-                    dx * dx + dy * dy > 9 && (x < 4 || x >= w - 4) && (y < body_y0 + 4 || y >= body_y1 - 4)
-                };
-                let cut = corner(4, body_y0 + 4)
-                    || corner(w - 5, body_y0 + 4)
-                    || corner(4, body_y1 - 5)
-                    || corner(w - 5, body_y1 - 5);
-                if cut {
+                if !crate::ui_draw::rounded_inside(x, y - body_y0, w, bh, 3) {
                     continue;
                 }
                 let edge = x < 2 || x >= w - 2 || y < body_y0 + 2 || y >= body_y1 - 2;
