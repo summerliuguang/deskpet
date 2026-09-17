@@ -59,15 +59,20 @@ impl MonRect {
     }
 }
 
-/// UI 缩放系数（主显示器 scale_factor，resumed 时设置；未设置 = 1.0）
-static UI_SCALE: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+/// UI 缩放系数 ×256 定点存储。
+/// 用原子量而不是 OnceLock：OnceLock 只能 set 一次，跨 DPI 屏拖动时
+/// ScaleFactorChanged 的第二次设置会被静默吞掉（缩放永远锁死在启动值）。
+static UI_SCALE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(256);
 
 pub fn set_ui_scale(s: f64) {
-    let _ = UI_SCALE.set(s.max(0.5));
+    use std::sync::atomic::Ordering;
+    let q = (s.max(0.5) * 256.0).round() as u32;
+    UI_SCALE.store(q.max(128), Ordering::Relaxed);
 }
 
 pub fn ui_scale() -> f64 {
-    *UI_SCALE.get().unwrap_or(&1.0)
+    use std::sync::atomic::Ordering;
+    UI_SCALE.load(std::sync::atomic::Ordering::Relaxed) as f64 / 256.0
 }
 
 /// 逻辑尺寸 → 物理像素
@@ -109,5 +114,19 @@ mod tests {
         // 中心在外 40px（> tol）：带容差也不命中
         let far_x = 800 + 40 - size / 2;
         assert!(!m.contains_center_tol(far_x, 300, size, size / 4));
+    }
+
+    /// 回归：UI_SCALE 必须可反复设置。曾用 OnceLock 只能 set 一次，
+    /// 跨 DPI 屏拖动时第二次设置被静默吞掉，缩放永远锁死在启动值。
+    #[test]
+    fn ui_scale_is_settable_repeatedly() {
+        set_ui_scale(1.5);
+        assert!((ui_scale() - 1.5).abs() < 1e-9);
+        set_ui_scale(1.0);
+        assert!((ui_scale() - 1.0).abs() < 1e-9);
+        // 下限保护：0.2 会被夹到 0.5
+        set_ui_scale(0.2);
+        assert!((ui_scale() - 0.5).abs() < 1e-9);
+        set_ui_scale(1.0);
     }
 }

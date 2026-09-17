@@ -16,11 +16,14 @@ use crate::model::{ModelInfo, PetModel, PetState, Pose};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
-/// 状态 → 片段名（模型目录里的文件前缀）
+/// 状态 → 片段名（模型目录里的文件前缀）。
+/// Climb → "climb"：模型可提供预旋转的爬墙帧；缺失时渲染层回退
+/// walk 帧并自动旋转 90°（见 render）。
 pub fn clip_name(state: &PetState) -> &'static str {
     match state {
         PetState::Idle => "idle",
-        PetState::Walk | PetState::Climb => "walk",
+        PetState::Walk => "walk",
+        PetState::Climb => "climb",
         PetState::Sleep => "sleep",
         PetState::Patted => "happy",
         PetState::Shocked | PetState::Thrown => "shock",
@@ -78,6 +81,8 @@ pub struct SpriteModel {
     /// (片段名, 换装下标) → 动画帧；换装缺失时回退到下标 0
     clips: HashMap<(String, usize), Vec<Vec<u32>>>,
     buf: Vec<u32>,
+    /// 爬墙兜底旋转的输出缓冲（climb 片段缺失时用 walk 帧旋转）
+    rot_buf: Vec<u32>,
 }
 
 impl SpriteModel {
@@ -153,6 +158,7 @@ impl SpriteModel {
             expr: 0,
             clips,
             buf: Vec::with_capacity(64 * 64),
+            rot_buf: Vec::with_capacity(64 * 64),
         })
     }
 
@@ -182,10 +188,16 @@ impl PetModel for SpriteModel {
         } else {
             None
         };
-        let state_clip = clip_name(&pose.state);
+        // 爬墙：优先用模型自带的预旋转 climb 片段；缺失则回退 walk 帧
+        // 并旋转 90° 兜底（内置模型爬墙是旋转的，帧序列模型不能直立贴墙）
+        let state_clip = if pose.state == PetState::Climb && self.clip_len("climb") == 0 {
+            "walk".to_string()
+        } else {
+            clip_name(&pose.state).to_string()
+        };
         let name = match expr_clip {
             Some(c) if self.clip_len(&c) > 0 => c,
-            _ => state_clip.to_string(),
+            _ => state_clip,
         };
         let len = self.clip_len(&name);
         if len > 0 {
@@ -199,6 +211,11 @@ impl PetModel for SpriteModel {
                 self.buf.clear();
                 self.buf.extend_from_slice(f);
             }
+        }
+        // 爬墙兜底旋转：仅当实际播放的是 walk 帧（climb 片段视为已预旋转）
+        if pose.state == PetState::Climb && pose.aux != 0 && name == "walk" {
+            crate::sprites::rotate90_into(&mut self.rot_buf, &self.buf, pose.aux < 0, 64);
+            return &self.rot_buf;
         }
         &self.buf
     }
@@ -302,5 +319,33 @@ mod tests {
         let out = model.render(&pose);
         assert_eq!(out.len(), 64 * 64);
         assert!(out.iter().any(|&p| p != 0), "渲染帧不能全透明");
+    }
+
+    /// 回归：无 climb 片段的模型爬墙时必须旋转 walk 帧兜底，
+    /// 不能直立贴墙（曾经 Climb 直接映射 walk 直立播放）。
+    #[test]
+    fn climb_without_clip_rotates_walk_frame() {
+        let base = std::path::Path::new("models");
+        let found = discover(base);
+        let Some((_, dir)) = found.iter().find(|(n, _)| n == "示例猫") else {
+            panic!("示例猫模型缺失");
+        };
+        let mut model = SpriteModel::load(dir.clone()).expect("示例猫应加载成功");
+        if model.clips.contains_key(&("climb".to_string(), 0)) {
+            return; // 模型自带预旋转 climb 片段，走另一条路径
+        }
+        let walk = Pose {
+            state: PetState::Walk,
+            tick: 0,
+            gaze: (0, 0),
+            expr: 0,
+            costume: 0,
+            aux: 0,
+            typing: false,
+        };
+        let upright = model.render(&walk).to_vec();
+        let climb = model.render(&Pose { state: PetState::Climb, aux: -1, ..walk });
+        assert_eq!(climb.len(), 64 * 64);
+        assert_ne!(upright.as_slice(), climb, "爬墙帧应是旋转后的 walk 帧");
     }
 }

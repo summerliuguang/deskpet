@@ -108,12 +108,16 @@ struct App {
     press: Option<PressInfo>,
     press_cursor: (f64, f64),
     drag_origin: (i32, i32),
+    /// 按下时的鼠标本地坐标 == 全局抓取偏移（按下时窗口未动，
+    /// local = global - win_pos 退化为 local = 抓取偏移），拖动全程锚定它
     grab: (f64, f64),
     drag_track: Vec<(Instant, f64, f64)>,
     thrown_vel: (f32, f32),
     climb_wall: i32,
     climb_vertical: i32,
-    last_click: Option<(Instant, (f64, f64))>,
+    /// 上一次"短点击"松开的时刻与位置（双击判定锚点：
+    /// 锚在松开而不是按下，单击后立刻按住拖动不会误判成双击）
+    last_release: Option<(Instant, (f64, f64))>,
     cursor: (f64, f64),
     rng: u64,
 
@@ -178,7 +182,7 @@ impl App {
             thrown_vel: (0.0, 0.0),
             climb_wall: 0,
             climb_vertical: 0,
-            last_click: None,
+            last_release: None,
             cursor: (0.0, 0.0),
             rng: 0x9E3779B97F4A7C15,
             chat_history: Vec::new(),
@@ -598,12 +602,11 @@ impl App {
 
     fn on_left_press(&mut self, window: &Window) {
         let now = Instant::now();
-        if let Some((t, p)) = self.last_click {
-            if now.duration_since(t) < Duration::from_millis(400)
-                && (self.cursor.0 - p.0).abs() < 8.0
-                && (self.cursor.1 - p.1).abs() < 8.0
-            {
-                self.last_click = None;
+        // 双击判定锚在上一次"短点击"的松开时刻：单击摸头（~150ms 松开）后
+        // 立刻按住想拖动，不会落进 400ms 窗口被误判成双击睡觉
+        if let Some((t, p)) = self.last_release {
+            if is_double_click(now, (t, p), self.cursor) {
+                self.last_release = None;
                 self.press = None;
                 if self.state == PetState::Sleep {
                     self.wake_with("喵呜…我醒啦");
@@ -614,7 +617,6 @@ impl App {
                 return;
             }
         }
-        self.last_click = Some((now, self.cursor));
         self.press_cursor = self.cursor;
 
         if self.state == PetState::Sleep {
@@ -629,7 +631,8 @@ impl App {
         self.state = PetState::Dragged;
         self.tick = 0;
         self.drag_origin = self.pos;
-        self.grab = (self.cursor.0 - self.pos.0 as f64, self.cursor.1 - self.pos.1 as f64);
+        // 按下时窗口未动：本地坐标 == 全局抓取偏移，拖动全程锚定它
+        self.grab = self.cursor;
         self.drag_track.clear();
         self.drag_track.push((Instant::now(), self.pos.0 as f64, self.pos.1 as f64));
         self.bubble_hide();
@@ -667,6 +670,8 @@ impl App {
     fn on_left_release(&mut self) {
         let press = self.press.take();
         if self.state == PetState::Dragged {
+            // 拖动/甩飞后的按下不是双击的前半段
+            self.last_release = None;
             let (vx, vy) = self.drag_velocity();
             let speed = (vx * vx + vy * vy).sqrt();
             if speed > FLING_SPEED_MIN {
@@ -699,6 +704,8 @@ impl App {
         }
         if let Some(p) = press {
             if p.start.elapsed() < Duration::from_millis(CLICK_MAX_MS) && !p.moved {
+                // 记为一次短点击（双击判定的锚点）
+                self.last_release = Some((Instant::now(), self.cursor));
                 self.click_zone();
             }
         }
@@ -1660,8 +1667,11 @@ impl ApplicationHandler<PetEvent> for App {
                 if self.state == PetState::Dragged {
                     if let Some(p) = &self.press {
                         if p.moved || p.start.elapsed() >= Duration::from_millis(DRAG_START_MS) {
-                            let nx = (self.cursor.0 - self.grab.0) as i32;
-                            let ny = (self.cursor.1 - self.grab.1) as i32;
+                            // 锚定全局：CursorMoved 的本地坐标 + 事件时窗口位置
+                            // （self.pos 尚未更新，正是事件时刻的位置）= 鼠标全局坐标。
+                            // 旧实现拿本地坐标直接减抓取偏移，但窗口一动本地坐标系
+                            // 随之平移，稳态下窗口只有鼠标一半速度，越拖掉队越远。
+                            let nx = apply_drag(self.pos, self.grab, self.cursor);
                             // 允许跨屏拖动：夹到所有显示器的联合包围盒
                             let (min_x, min_y) = self
                                 .mons
@@ -1671,7 +1681,7 @@ impl ApplicationHandler<PetEvent> for App {
                                 (i32::MIN, i32::MIN),
                                 |a, m| (a.0.max(m.x + m.w - self.pet_size), a.1.max(m.y + m.h - self.pet_size)),
                             );
-                            self.pos = (nx.clamp(min_x, max_x), ny.clamp(min_y, max_y));
+                            self.pos = (nx.0.clamp(min_x, max_x), nx.1.clamp(min_y, max_y));
                             window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                             self.drag_track
                                 .push((Instant::now(), self.pos.0 as f64, self.pos.1 as f64));
@@ -1694,6 +1704,14 @@ impl ApplicationHandler<PetEvent> for App {
             WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
                 // 拖到不同缩放的显示器：按新缩放重设宠物窗口
                 deskpet::set_ui_scale(scale_factor);
+                // 内置像素模型的 sprite_scale 在构造时按当时的 ui_scale 定死，
+                // 缩放变化必须重建（保留换装/表情）；帧序列模型 64px 固定不受影响
+                if let Some((_, ModelSource::Builtin(kind))) = self.models.get(self.model_kind).map(|(n, s)| (n.clone(), s.clone())) {
+                    let (costume, expr) = (self.model.costume(), self.model.expression());
+                    self.model = make_model(kind);
+                    self.model.set_costume(costume);
+                    self.model.set_expression(expr);
+                }
                 self.pet_size = self.model.size().0 as i32;
                 let _ = inner_size_writer.request_inner_size(PhysicalSize::new(
                     self.pet_size as u32,
@@ -2436,4 +2454,65 @@ fn main() {
     spawn_fullscreen_watcher(proxy.clone());
     let mut app = App::new(cfg, settings, proxy, startup_diag);
     event_loop.run_app(&mut app).expect("事件循环异常退出");
+}
+
+/// 拖动锚定全局（纯函数，回归守护半速跟随 bug）：
+/// CursorMoved 的本地坐标 + 事件时窗口位置（pos，尚未更新）= 鼠标全局坐标（恒等式）；
+/// 减去按下时的抓取偏移（= 按下时本地坐标，因按下时窗口未动）即新窗口位置。
+fn apply_drag(pos: (i32, i32), grab_offset: (f64, f64), cur_local: (f64, f64)) -> (i32, i32) {
+    let gm = (cur_local.0 + pos.0 as f64, cur_local.1 + pos.1 as f64);
+    ((gm.0 - grab_offset.0) as i32, (gm.1 - grab_offset.1) as i32)
+}
+
+/// 双击判定：距上次短点击松开 ≤400ms 且位移 <8px（纯函数）
+fn is_double_click(
+    now: Instant,
+    last: (Instant, (f64, f64)),
+    cur: (f64, f64),
+) -> bool {
+    now.duration_since(last.0) < Duration::from_millis(400)
+        && (cur.0 - last.1 .0).abs() < 8.0
+        && (cur.1 - last.1 .1).abs() < 8.0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 回归：拖动必须 1:1 跟手。模拟真实事件流——每个事件的本地坐标
+    /// 基于上一步移动后的窗口位置。旧实现（本地坐标直接减抓取偏移）
+    /// 稳态下窗口只有鼠标一半速度，本测试锁死正确行为。
+    #[test]
+    fn drag_follows_cursor_one_to_one() {
+        // 起点：窗口 (100,100)，鼠标全局 130 → 按下时本地 (30,30) 即抓取偏移
+        let grab = (30.0f64, 30.0f64);
+        let mut pos = (100i32, 100i32);
+        // 鼠标全局每步 +10；本地坐标 = 全局 - 当前窗口位置
+        let mouse_global = [140i32, 150, 160, 170];
+        for gx in mouse_global {
+            let local = ((gx - pos.0) as f64, (gx - pos.0) as f64);
+            pos = apply_drag(pos, grab, local);
+        }
+        // 鼠标全程 +40，窗口必须到 100+40（旧实现只能走到一半）
+        assert_eq!(pos, (140, 140), "窗口位移应等于鼠标全程位移");
+    }
+
+    #[test]
+    fn drag_handles_negative_local_coords() {
+        // 捕获期间光标移出窗口左侧：本地坐标为负同样正确
+        // 窗口 (100,100)，抓取偏移 30 → 鼠标全局 80，本地 = 80-100 = -20
+        let pos = apply_drag((100, 100), (30.0, 30.0), (-20.0, -20.0));
+        assert_eq!(pos, (50, 50), "鼠标在 80，窗口应保持 30 的抓取偏移");
+    }
+
+    #[test]
+    fn double_click_requires_quick_release_then_press() {
+        // 用真实时钟的小间隔：松开后立刻按下 = 双击
+        let t = Instant::now();
+        assert!(is_double_click(t + Duration::from_millis(100), (t, (50.0, 50.0)), (52.0, 51.0)));
+        // 按下后隔 600ms 才再按：不是双击
+        assert!(!is_double_click(t + Duration::from_millis(600), (t, (50.0, 50.0)), (50.0, 50.0)));
+        // 时间够近但位移大（拖动释放后的按下）：不是双击
+        assert!(!is_double_click(t + Duration::from_millis(100), (t, (50.0, 50.0)), (80.0, 80.0)));
+    }
 }
