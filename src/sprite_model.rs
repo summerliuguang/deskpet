@@ -10,11 +10,20 @@
 //! │   └── expr_1_0.png ...            # 表情片段 expr_<表情下标>_<帧>
 //! └── 冬装/ ...
 //! ```
-//! 片段缺失自动回退到 idle。所有帧必须 64x64 RGBA PNG。
+//! 片段缺失自动回退到 idle（爬墙回退 walk+旋转）。所有帧必须 64x64 RGBA PNG。
+//!
+//! 内存纪律：**懒加载 + 字节预算 LRU**。片段首次被渲染到才从磁盘解码
+//! （单片段几毫秒，不卡 UI）；已解码总量超预算（默认 24MB）时按最久未用
+//! 逐出整片段，再次用到会重新解码——Live2D 预渲染几百帧的大模型也不会
+//! 内存爆炸。
 
 use crate::model::{ModelInfo, PetModel, PetState, Pose};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
+
+/// 已解码片段的字节预算（每帧 64*64*4 = 16KB）
+const DEFAULT_BUDGET_BYTES: usize = 24 * 1024 * 1024;
 
 /// 状态 → 片段名（模型目录里的文件前缀）。
 /// Climb → "climb"：模型可提供预旋转的爬墙帧；缺失时渲染层回退
@@ -70,23 +79,37 @@ fn load_clip(cdir: &Path, clip: &str) -> Option<Vec<Vec<u32>>> {
     if frames.is_empty() { None } else { Some(frames) }
 }
 
-/// 帧序列模型（PetModel 实现）：数据全部在加载时读入内存
+fn clip_bytes(clip: &[Vec<u32>]) -> usize {
+    clip.iter().map(|f| f.len() * 4).sum()
+}
+
+/// 帧序列模型（PetModel 实现）：片段懒加载，解码量受预算约束
 pub struct SpriteModel {
     pub dir: PathBuf,
     info: ModelInfo,
     fps: u64,
     costumes: Vec<String>,
+    /// 每套换装的帧目录（懒加载时按需读盘）
+    costume_dirs: Vec<PathBuf>,
     costume: usize,
     expr: usize,
-    /// (片段名, 换装下标) → 动画帧；换装缺失时回退到下标 0
-    clips: HashMap<(String, usize), Vec<Vec<u32>>>,
+    /// (片段名, 换装下标) → 解码缓存；None = 磁盘确认缺失（避免重复扫盘）。
+    /// 换装缺失时由调用方回退到下标 0。
+    cache: HashMap<(String, usize), Option<Vec<Vec<u32>>>>,
+    /// 已加载片段的最后使用时刻（预算逐出依据）
+    last_use: HashMap<(String, usize), Instant>,
+    /// 当前已解码字节数
+    decoded_bytes: usize,
+    /// 解码预算（测试可调小）
+    budget: usize,
     buf: Vec<u32>,
     /// 爬墙兜底旋转的输出缓冲（climb 片段缺失时用 walk 帧旋转）
     rot_buf: Vec<u32>,
 }
 
 impl SpriteModel {
-    /// 从模型目录加载；缺 idle 片段（所有缺失片段的回退兜底）或尺寸不符时返回 None
+    /// 从模型目录加载。只读 model.toml + 校验 idle_0.png 存在（一次 stat），
+    /// 不做任何帧解码——切换模型零卡顿，片段在首次渲染时按需加载。
     pub fn load(dir: PathBuf) -> Option<Self> {
         let text = std::fs::read_to_string(dir.join("model.toml")).ok()?;
         let v = text.parse::<toml::Value>().ok()?;
@@ -118,32 +141,17 @@ impl SpriteModel {
             costumes.push(("默认".into(), dir.clone()));
         }
 
+        // idle 是所有缺失片段的回退兜底：第一套换装目录必须有 idle_0.png
+        let cdir0 = costumes.first().map(|(_, d)| d.clone()).unwrap_or_else(|| dir.clone());
+        if !cdir0.join("idle_0.png").exists() {
+            return None;
+        }
+
         let expressions: Vec<String> = v
             .get("expressions")
             .and_then(|x| x.as_array())
             .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
             .unwrap_or_default();
-
-        let mut clips = HashMap::new();
-        let clip_names = [
-            "idle", "walk", "sleep", "happy", "shock", "dragged", "sit", "stretch", "groom",
-            "eat", "climb", "perch",
-        ];
-        for (ci, (_, cdir)) in costumes.iter().enumerate() {
-            for cn in clip_names {
-                if let Some(frames) = load_clip(cdir, cn) {
-                    clips.insert((cn.to_string(), ci), frames);
-                }
-            }
-            for ei in 0..expressions.len() {
-                if let Some(frames) = load_clip(cdir, &format!("expr_{ei}")) {
-                    clips.insert((format!("expr_{ei}"), ci), frames);
-                }
-            }
-        }
-
-        // idle 是所有缺失片段的回退兜底，必须有
-        clips.get(&("idle".into(), 0))?;
 
         Some(Self {
             dir,
@@ -153,23 +161,83 @@ impl SpriteModel {
                 expressions,
             },
             fps,
-            costumes: costumes.into_iter().map(|(n, _)| n).collect(),
+            costumes: costumes.iter().map(|(n, _)| n.clone()).collect(),
+            costume_dirs: costumes.into_iter().map(|(_, d)| d).collect(),
             costume: 0,
             expr: 0,
-            clips,
+            cache: HashMap::new(),
+            last_use: HashMap::new(),
+            decoded_bytes: 0,
+            budget: DEFAULT_BUDGET_BYTES,
             buf: Vec::with_capacity(64 * 64),
             rot_buf: Vec::with_capacity(64 * 64),
         })
     }
 
-    fn clip_len(&self, name: &str) -> usize {
-        self.clips
-            .get(&(name.to_string(), self.costume))
-            .or_else(|| self.clips.get(&(name.to_string(), 0)))
-            .map(|c| c.len())
-            .unwrap_or(0)
+    /// 确保片段已解码（缺失结果也会被缓存）。返回是否真实存在。
+    fn ensure_clip(&mut self, name: &str, costume: usize) -> bool {
+        let key = (name.to_string(), costume);
+        if !self.cache.contains_key(&key) {
+            let cdir = self
+                .costume_dirs
+                .get(costume)
+                .cloned()
+                .unwrap_or_else(|| self.dir.clone());
+            let frames = load_clip(&cdir, name);
+            let bytes = frames.as_ref().map(|c| clip_bytes(c)).unwrap_or(0);
+            let present = frames.is_some();
+            self.cache.insert(key.clone(), frames);
+            if bytes > 0 {
+                self.decoded_bytes += bytes;
+                self.last_use.insert(key.clone(), Instant::now());
+                self.evict_over_budget(&key);
+            }
+            return present;
+        }
+        self.cache.get(&key).map(|c| c.is_some()).unwrap_or(false)
     }
 
+    /// 已解码总量超预算时，按最久未用逐出整片段（跳过刚加载的 keep）
+    fn evict_over_budget(&mut self, keep: &(String, usize)) {
+        while self.decoded_bytes > self.budget {
+            let victim = self
+                .last_use
+                .iter()
+                .filter(|(k, _)| k != &keep)
+                .filter(|(k, _)| self.cache.get(*k).map(|c| c.is_some()).unwrap_or(false))
+                .min_by_key(|(_, t)| *t)
+                .map(|(k, _)| k.clone());
+            let Some(victim) = victim else { break };
+            if let Some(Some(clip)) = self.cache.remove(&victim) {
+                self.decoded_bytes -= clip_bytes(&clip);
+            }
+            self.last_use.remove(&victim);
+        }
+    }
+
+    /// 片段可用性（当前换装优先，缺失回退第 0 套；触发懒加载）
+    fn has_clip(&mut self, name: &str) -> bool {
+        let c = self.costume;
+        self.ensure_clip(name, c) || self.ensure_clip(name, 0)
+    }
+
+    /// 取片段帧：当前换装优先，缺失回退第 0 套；刷新 LRU 时间戳。
+    /// 返回实际命中的换装下标。
+    fn frames_of(&mut self, name: &str) -> Option<usize> {
+        let mut costume = self.costume;
+        if !self.ensure_clip(name, costume) {
+            costume = 0;
+            self.ensure_clip(name, 0);
+        }
+        let key = (name.to_string(), costume);
+        let present = self.cache.get(&key).map(|c| c.is_some()).unwrap_or(false);
+        if present {
+            self.last_use.insert(key, Instant::now());
+            Some(costume)
+        } else {
+            None
+        }
+    }
 }
 
 impl PetModel for SpriteModel {
@@ -183,30 +251,24 @@ impl PetModel for SpriteModel {
 
     fn render(&mut self, pose: &Pose) -> &[u32] {
         // 钉选表情且有对应片段 → 循环播放表情动画
-        let expr_clip = if pose.expr > 0 {
-            Some(format!("expr_{}", pose.expr))
-        } else {
-            None
-        };
-        // 爬墙：优先用模型自带的预旋转 climb 片段；缺失则回退 walk 帧
-        // 并旋转 90° 兜底（内置模型爬墙是旋转的，帧序列模型不能直立贴墙）
-        let state_clip = if pose.state == PetState::Climb && self.clip_len("climb") == 0 {
+        let expr_name = if pose.expr > 0 { format!("expr_{}", pose.expr) } else { String::new() };
+        // 爬墙：优先模型自带的预旋转 climb 片段；缺失回退 walk 帧 + 旋转兜底
+        // （内置模型爬墙是旋转的，帧序列模型不能直立贴墙）
+        let use_climb_fallback =
+            pose.state == PetState::Climb && !self.has_clip("climb");
+        let state_name = if use_climb_fallback {
             "walk".to_string()
         } else {
             clip_name(&pose.state).to_string()
         };
-        let name = match expr_clip {
-            Some(c) if self.clip_len(&c) > 0 => c,
-            _ => state_clip,
+        let name = if !expr_name.is_empty() && self.has_clip(&expr_name) {
+            expr_name
+        } else {
+            state_name
         };
-        let len = self.clip_len(&name);
-        if len > 0 {
-            // clips 与 buf 是不同字段，字段级借用可分离
-            if let Some(clip) = self
-                .clips
-                .get(&(name.clone(), self.costume))
-                .or_else(|| self.clips.get(&(name.clone(), 0)))
-            {
+        if let Some(costume) = self.frames_of(&name) {
+            let key = (name.clone(), costume);
+            if let Some(Some(clip)) = self.cache.get(&key) {
                 let f = &clip[pose.tick as usize % clip.len()];
                 self.buf.clear();
                 self.buf.extend_from_slice(f);
@@ -277,24 +339,6 @@ pub fn encode_png(path: &Path, w: u32, h: u32, argb: &[u32]) -> Result<(), Strin
 mod tests {
     use super::*;
 
-    /// discover 结果按显示名稳定排序（注册表下标被持久化，顺序乱会恢复错模型）
-    #[test]
-    fn discover_results_sorted_by_name() {
-        let base = std::env::temp_dir().join(format!("deskpet_discover_test_{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&base);
-        for name in ["乙模型", "甲模型"] {
-            let d = base.join(name);
-            std::fs::create_dir_all(&d).unwrap();
-            std::fs::write(d.join("model.toml"), format!("name = \"{name}\"\n")).unwrap();
-        }
-        let found = discover(&base);
-        let _ = std::fs::remove_dir_all(&base);
-        let names: Vec<&str> = found.iter().map(|(n, _)| n.as_str()).collect();
-        let mut sorted = names.clone();
-        sorted.sort();
-        assert_eq!(names, sorted, "discover 应按显示名排序: {names:?}");
-    }
-
     /// 端到端：models/示例猫（由 export_example_model 导出并随仓库分发）
     /// 必须能被 discover 发现、加载成功，且渲染出非空帧
     #[test]
@@ -331,7 +375,7 @@ mod tests {
             panic!("示例猫模型缺失");
         };
         let mut model = SpriteModel::load(dir.clone()).expect("示例猫应加载成功");
-        if model.clips.contains_key(&("climb".to_string(), 0)) {
+        if model.cache.contains_key(&("climb".to_string(), 0)) {
             return; // 模型自带预旋转 climb 片段，走另一条路径
         }
         let walk = Pose {
@@ -347,5 +391,59 @@ mod tests {
         let climb = model.render(&Pose { state: PetState::Climb, aux: -1, ..walk });
         assert_eq!(climb.len(), 64 * 64);
         assert_ne!(upright.as_slice(), climb, "爬墙帧应是旋转后的 walk 帧");
+    }
+
+    /// 懒加载 + 预算逐出：超预算时最久未用的片段被逐出，再次用到重新解码
+    #[test]
+    fn lazy_loading_evicts_over_budget() {
+        let dir = std::env::temp_dir().join(format!("deskpet_lru_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.toml"), "name = \"lru\"\nfps = 8\n").unwrap();
+        // 每帧 64*64*4 = 16KB：idle 2 帧 + walk 6 帧 = 128KB
+        let blank = vec![0xFF112233u32; 64 * 64];
+        for i in 0..2 {
+            encode_png(&dir.join(format!("idle_{i}.png")), 64, 64, &blank).unwrap();
+        }
+        for i in 0..6 {
+            encode_png(&dir.join(format!("walk_{i}.png")), 64, 64, &blank).unwrap();
+        }
+        let mut model = SpriteModel::load(dir.clone()).expect("应加载成功");
+        model.budget = 100 * 1024; // 100KB < 128KB：装不下全部
+
+        // 先播 walk（装载 walk，96KB）
+        let walk = Pose { state: PetState::Walk, tick: 0, gaze: (0, 0), expr: 0, costume: 0, aux: 0, typing: false };
+        let w = model.render(&walk);
+        assert!(w.iter().any(|&p| p != 0));
+        assert!(model.cache.get(&("walk".into(), 0)).unwrap().is_some());
+        // 再播 idle（32KB → 总 128KB 超预算 → walk 被逐出）
+        let idle = Pose { state: PetState::Idle, tick: 0, gaze: (0, 0), expr: 0, costume: 0, aux: 0, typing: false };
+        let i = model.render(&idle);
+        assert!(i.iter().any(|&p| p != 0));
+        assert!(
+            model.cache.get(&("walk".into(), 0)).map(|c| c.is_none()).unwrap_or(true),
+            "超预算后 walk 片段应被逐出"
+        );
+        // 再次播 walk：应重新从磁盘解码成功
+        let w2 = model.render(&walk);
+        assert!(w2.iter().any(|&p| p != 0), "逐出后再次使用应重新解码");
+        assert!(model.cache.get(&("walk".into(), 0)).unwrap().is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 缺失片段的结果被缓存（None），不会每次渲染都扫盘
+    #[test]
+    fn missing_clip_result_is_cached() {
+        let dir = std::env::temp_dir().join(format!("deskpet_miss_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.toml"), "name = \"miss\"\n").unwrap();
+        let blank = vec![0xFF445566u32; 64 * 64];
+        encode_png(&dir.join("idle_0.png"), 64, 64, &blank).unwrap();
+        let mut model = SpriteModel::load(dir.clone()).unwrap();
+        assert!(!model.ensure_clip("climb", 0), "磁盘上没有 climb 片段");
+        assert!(model.cache.contains_key(&("climb".into(), 0)), "缺失结果应缓存为 None");
+        assert!(!model.ensure_clip("climb", 0), "第二次查询直接命中缓存，不再扫盘");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

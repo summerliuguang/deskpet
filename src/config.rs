@@ -196,9 +196,14 @@ pub fn persist_settings(pairs: &[(String, toml::Value)]) {
     if let Ok(out) = toml::to_string(&table) {
         let header = "# deskpet 配置（由菜单-设置页与手写配置共用）\n";
         let tmp = path.with_extension("toml.tmp");
-        if std::fs::write(&tmp, format!("{header}\n{out}")).is_ok() {
-            let _ = std::fs::rename(&tmp, &path);
+        let wrote = std::fs::write(&tmp, format!("{header}\n{out}"))
+            .and_then(|_| std::fs::rename(&tmp, &path));
+        if wrote.is_err() {
+            // 磁盘满/只读/权限：开关状态静默丢失会很迷惑，记进日志
+            crate::dwarn("persist-config", "deskpet.toml 写入失败（磁盘满或不可写？）");
         }
+    } else {
+        crate::dwarn("persist-config", "deskpet.toml 序列化失败");
     }
 }
 

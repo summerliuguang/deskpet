@@ -16,12 +16,13 @@ use deskpet::{
     ai::{build_history, ChatMsg, Client, Role},
     bubble::BubbleWin,
     config::{Config, Settings},
+    dwarn,
     inputbox::{InputAction, InputBox},
     sprite_model::SpriteModel,
     menu::{Entry, MenuOutcome, MenuWin, Page},
     model::{make_model, model_names, PetModel, PetState, Pose},
     todo::{TodoAction, TodoWin},
-    tts, MonRect, PetEvent, PetEventProxy, SbSurface,
+    tts, dlog, MonRect, PetEvent, PetEventProxy, SbSurface,
 };
 #[cfg(windows)]
 use deskpet::{input, sprites};
@@ -138,6 +139,11 @@ struct App {
     startup_diag: Option<String>,
     /// 首次引导气泡显示时刻
     onboard_at: Option<Instant>,
+    /// --selftest 冒烟模式：创建全部窗口渲染一帧后自动退出
+    selftest: bool,
+    /// 冒烟模式中已完成渲染探活的窗口
+    selftest_seen: Vec<&'static str>,
+    selftest_deadline: Option<Instant>,
 }
 
 impl App {
@@ -196,6 +202,9 @@ impl App {
             due_check_at: Instant::now() + Duration::from_secs(20),
             startup_diag,
             onboard_at: None,
+            selftest: false,
+            selftest_seen: Vec::new(),
+            selftest_deadline: None,
         }
     }
 
@@ -778,16 +787,23 @@ impl App {
         let pose = self.build_pose();
         let sprite = self.model.render(&pose);
         let Some(surface) = &mut self.surface else { return };
-        if let Ok(mut buf) = surface.buffer_mut() {
-            for (dst, src) in buf.iter_mut().zip(sprite.iter()) {
-                // 透明像素填色键（分层窗口：视觉透明 + 点击穿透）
-                *dst = if src & 0xFF000000 == 0 {
-                    COLORKEY
-                } else {
-                    0xFF000000 | (src & 0x00FFFFFF)
-                };
+        match surface.buffer_mut() {
+            Ok(mut buf) => {
+                for (dst, src) in buf.iter_mut().zip(sprite.iter()) {
+                    // 透明像素填色键（分层窗口：视觉透明 + 点击穿透）
+                    *dst = if src & 0xFF000000 == 0 {
+                        COLORKEY
+                    } else {
+                        0xFF000000 | (src & 0x00FFFFFF)
+                    };
+                }
+                if let Err(_) = buf.present() {
+                    dwarn("present", "宠物窗口呈现失败（GDI 异常？）");
+                }
             }
-            let _ = buf.present();
+            Err(_) => {
+                dwarn("present", "渲染缓冲获取失败，跳过本帧");
+            }
         }
         self.frame_at = Some(Instant::now() + self.frame_duration());
         self.schedule(el);
@@ -956,6 +972,7 @@ impl App {
                     self.model_kind = i;
                 }
                 None => {
+                    dwarn("model-load", &format!("模型 {} 加载失败", name));
                     self.bubble_show("这个模型加载失败了喵");
                     return;
                 }
@@ -1563,12 +1580,63 @@ impl ApplicationHandler<PetEvent> for App {
 
         window.request_redraw();
         dlog("启动完成");
+        if self.selftest {
+            // 冒烟：创建全部派生窗口并触发渲染，全部收到 Redraw 后 exit(0)
+            self.ensure_input(el);
+            self.ensure_todo(el);
+            #[cfg(windows)]
+            if self.menu.is_none() {
+                let pages = vec![(Page::Root, self.root_entries())];
+                if let Some(m) = MenuWin::create(el, pages, Page::Root) {
+                    self.menu = Some(m.open((self.mon.x + 40, self.mon.y + 40), self.mon));
+                }
+            }
+            self.bubble_show("SELFTEST 气泡渲染探活");
+            self.selftest_deadline = Some(Instant::now() + Duration::from_secs(5));
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+            dlog("SELFTEST：窗口渲染探活开始（5 秒超时）");
+        }
+    }
+
+    /// 事件处理 panic 兜底：记录日志并恢复动画调度，宠物不闪退
+    /// （release 为 unwind 策略，工作线程 panic 也只死线程不死进程）
+    fn recover_from_panic(&mut self, stage: &str) {
+        dwarn(
+            &format!("panic-{stage}"),
+            &format!("事件处理 panic 已拦截（{stage}），宠物继续运行"),
+        );
+        self.press = None;
+        self.frame_at = Some(Instant::now() + Duration::from_millis(300));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
     }
 
     fn window_event(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.window_event_inner(el, window_id, event);
+        }));
+        if result.is_err() {
+            self.recover_from_panic("window_event");
+        }
+    }
+
+    /// 冒烟模式：记录某窗口已完成一次渲染
+    fn mark_selftest_drawn(&mut self, which: &'static str) {
+        if self.selftest && !self.selftest_seen.contains(&which) {
+            self.selftest_seen.push(which);
+        }
+    }
+
+    fn window_event_inner(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
         // 右键菜单窗口事件路由
         if let Some(menu) = &mut self.menu {
             if menu.window.id() == window_id {
+                if matches!(event, WindowEvent::RedrawRequested) {
+                    self.mark_selftest_drawn("menu");
+                }
                 let outcome = match &event {
                     WindowEvent::RedrawRequested => {
                         menu.draw();
@@ -1606,6 +1674,9 @@ impl ApplicationHandler<PetEvent> for App {
         // 悬浮输入框事件路由
         if let Some(input) = &mut self.input {
             if input.window.id() == window_id {
+                if matches!(event, WindowEvent::RedrawRequested) {
+                    self.mark_selftest_drawn("input");
+                }
                 let action = match &event {
                     WindowEvent::RedrawRequested => {
                         input.draw();
@@ -1631,6 +1702,9 @@ impl ApplicationHandler<PetEvent> for App {
         // 待办窗事件路由
         if let Some(todo) = &mut self.todo {
             if todo.window.id() == window_id {
+                if matches!(event, WindowEvent::RedrawRequested) {
+                    self.mark_selftest_drawn("todo");
+                }
                 let action = match &event {
                     WindowEvent::RedrawRequested => {
                         todo.draw();
@@ -1650,7 +1724,10 @@ impl ApplicationHandler<PetEvent> for App {
             return;
         }
         match event {
-            WindowEvent::RedrawRequested => self.draw_pet(el),
+            WindowEvent::RedrawRequested => {
+                self.mark_selftest_drawn("pet");
+                self.draw_pet(el);
+            }
             WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
                 self.on_left_press(&window);
                 self.schedule(el);
@@ -1748,6 +1825,15 @@ impl ApplicationHandler<PetEvent> for App {
     }
 
     fn user_event(&mut self, el: &ActiveEventLoop, event: PetEvent) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.user_event_inner(el, event);
+        }));
+        if result.is_err() {
+            self.recover_from_panic("user_event");
+        }
+    }
+
+    fn user_event_inner(&mut self, el: &ActiveEventLoop, event: PetEvent) {
         match event {
             PetEvent::FullscreenChanged(fs) => self.set_hidden(el, fs),
             PetEvent::MonitorsChanged => {
@@ -1826,6 +1912,15 @@ impl ApplicationHandler<PetEvent> for App {
     }
 
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.about_to_wait_inner(el);
+        }));
+        if result.is_err() {
+            self.recover_from_panic("about_to_wait");
+        }
+    }
+
+    fn about_to_wait_inner(&mut self, el: &ActiveEventLoop) {
         // 托盘 / 右键菜单事件（muda 全局通道）
         #[cfg(windows)]
         while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
@@ -1948,6 +2043,28 @@ impl ApplicationHandler<PetEvent> for App {
                 self.fire_reminder(false);
             }
         }
+        // 冒烟模式：全部窗口渲染到位 → 通过退出；超时 → 失败退出
+        if self.selftest {
+            #[cfg(windows)]
+            let required: &[&str] = &["pet", "menu", "input", "todo"];
+            #[cfg(not(windows))]
+            let required: &[&str] = &["pet", "input", "todo"];
+            if required.iter().all(|r| self.selftest_seen.contains(r)) {
+                dlog("SELFTEST PASS：全部窗口渲染探活通过");
+                std::process::exit(0);
+            }
+            if let Some(dl) = self.selftest_deadline {
+                if Instant::now() >= dl {
+                    let missing: Vec<&str> = required
+                        .iter()
+                        .filter(|r| !self.selftest_seen.contains(r))
+                        .copied()
+                        .collect();
+                    dlog(&format!("SELFTEST FAILED：未收到渲染的窗口 {missing:?}"));
+                    std::process::exit(1);
+                }
+            }
+        }
         self.schedule(el);
     }
 }
@@ -2024,8 +2141,13 @@ impl App {
             "text": text,
         })
         .to_string();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
-            let _ = writeln!(f, "{line}");
+        let open_result = std::fs::OpenOptions::new().create(true).append(true).open(&path);
+        if let Ok(mut f) = open_result {
+            if writeln!(f, "{line}").is_err() {
+                dwarn("chat-log", "聊天记录写入失败");
+            }
+        } else {
+            dwarn("chat-log", "聊天记录文件无法打开");
         }
         // 低频裁剪：追加后超过 500 行则重写保留最后 400 行
         if let Ok(content) = std::fs::read_to_string(&path) {
@@ -2361,21 +2483,8 @@ fn create_tray() -> Result<tray_icon::TrayIcon, Box<dyn std::error::Error>> {
     Ok(tray)
 }
 
-/// 启动诊断日志：写到 exe 旁 deskpet.log（不可写则退 %TEMP%）
-fn dlog(msg: &str) {
-    use std::io::Write;
-    let path = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|d| d.join("deskpet.log")))
-        .unwrap_or_else(|| std::env::temp_dir().join("deskpet.log"));
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
-        let secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_secs())
-            .unwrap_or(0);
-        let _ = writeln!(f, "[{secs}] {msg}");
-    }
-}
+/// 启动诊断日志已移至 lib（deskpet::dlog / deskpet::dwarn），
+/// 库模块（config/todo）与主程序共用同一份 deskpet.log。
 
 /// 单实例互斥：已有桌宠运行时直接退出（防止双开出现两只猫/资源冲突）
 #[cfg(windows)]
@@ -2429,12 +2538,76 @@ unsafe fn enable_colorkey(hwnd: isize) -> bool {
     SetLayeredWindowAttributes(h, COLORREF(COLORKEY), 0, LWA_COLORKEY).is_ok()
 }
 
+/// --selftest 纯逻辑自检：全部内置模型 × 全部状态渲染非空、
+/// models/ 下的帧序列模型加载渲染、字体行高、配置解析。返回失败清单。
+fn run_selftest_logic() -> Vec<String> {
+    let mut failures = Vec::new();
+    let states = [
+        PetState::Idle, PetState::Walk, PetState::Sleep, PetState::Patted,
+        PetState::Shocked, PetState::Dragged, PetState::Thrown, PetState::Climb,
+        PetState::Sitting, PetState::Stretch, PetState::Groom, PetState::Eat,
+        PetState::Perch,
+    ];
+    for kind in 0..model_names().len() {
+        let mut m = make_model(kind);
+        for st in states {
+            let pose = Pose {
+                state: st, tick: 1, gaze: (1, 1), expr: 0, costume: 0, aux: -1, typing: false,
+            };
+            let out = m.render(&pose);
+            if out.is_empty() || out.iter().all(|&p| p == 0) {
+                failures.push(format!("内置模型{kind} 状态{st:?} 渲染为空"));
+            }
+        }
+    }
+    let found = deskpet::sprite_model::discover(std::path::Path::new("models"));
+    if found.is_empty() {
+        failures.push("models/ 下没有发现任何帧序列模型".into());
+    }
+    for (name, dir) in found {
+        match SpriteModel::load(dir) {
+            Some(mut m) => {
+                let pose = Pose {
+                    state: PetState::Idle, tick: 0, gaze: (0, 0), expr: 0,
+                    costume: 0, aux: 0, typing: false,
+                };
+                if m.render(&pose).is_empty() {
+                    failures.push(format!("帧序列模型 {name} 渲染为空"));
+                }
+            }
+            None => failures.push(format!("帧序列模型 {name} 加载失败")),
+        }
+    }
+    let lh = deskpet::text::TEXT.line_height(12);
+    if !(12..=24).contains(&lh) {
+        failures.push(format!("字体行高异常: {lh}"));
+    }
+    if deskpet::config::parse_config("").pet_name.is_empty() {
+        failures.push("默认配置解析异常".into());
+    }
+    failures
+}
+
 fn main() {
     std::panic::set_hook(Box::new(|info| {
         dlog(&format!("PANIC: {info}"));
     }));
     dlog("启动：v0.3.2");
     ensure_single_instance();
+    // --selftest：纯逻辑自检不通过直接退出；通过则继续窗口渲染探活
+    let selftest = std::env::args().any(|a| a == "--selftest");
+    if selftest {
+        dlog("SELFTEST：逻辑自检开始");
+        let failures = run_selftest_logic();
+        if !failures.is_empty() {
+            for f in &failures {
+                dlog(&format!("SELFTEST 失败：{f}"));
+            }
+            dlog("SELFTEST FAILED");
+            std::process::exit(1);
+        }
+        dlog("SELFTEST：逻辑自检通过，进入窗口渲染探活");
+    }
     let text = deskpet::config::load_text();
     let cfg = text.as_deref().map(deskpet::config::parse_config).unwrap_or_default();
     let settings = deskpet::config::parse_settings(text.as_deref().unwrap_or(""));
@@ -2453,6 +2626,7 @@ fn main() {
     let proxy = event_loop.create_proxy();
     spawn_fullscreen_watcher(proxy.clone());
     let mut app = App::new(cfg, settings, proxy, startup_diag);
+    app.selftest = selftest;
     event_loop.run_app(&mut app).expect("事件循环异常退出");
 }
 

@@ -88,6 +88,40 @@ pub fn now_ms() -> u64 {
         .unwrap_or(0)
 }
 
+/// 启动/运行诊断日志：写到 exe 旁 deskpet.log（不可写则退 %TEMP%）。
+/// 放在 lib 层：config/todo 等库模块也需要记录失败。
+pub fn dlog(msg: &str) {
+    append_log(&format!("[{}] {msg}", now_ms() / 1000));
+}
+
+/// 带限频的警告日志：同 key 60 秒内只记一次，防止高频失败（如每帧
+/// present 失败）刷爆日志文件。
+pub fn dwarn(key: &str, msg: &str) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static LAST_WARN: Mutex<Option<HashMap<String, u64>>> = Mutex::new(None);
+    let now = now_ms();
+    let Ok(mut guard) = LAST_WARN.lock() else { return };
+    let map = guard.get_or_insert_with(HashMap::new);
+    if map.get(key).map(|t| now.saturating_sub(*t) < 60_000).unwrap_or(false) {
+        return;
+    }
+    map.insert(key.to_string(), now);
+    drop(guard);
+    append_log(&format!("[{}][WARN] {msg}", now / 1000));
+}
+
+fn append_log(line: &str) {
+    use std::io::Write;
+    let path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("deskpet.log")))
+        .unwrap_or_else(|| std::env::temp_dir().join("deskpet.log"));
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(f, "{line}");
+    }
+}
+
 /// softbuffer 0.4 的泛型参数直接持有窗口句柄，用 Arc<Window> 保证 'static
 pub type SbSurface =
     softbuffer::Surface<std::sync::Arc<winit::window::Window>, std::sync::Arc<winit::window::Window>>;

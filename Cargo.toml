@@ -35,4 +35,6 @@ opt-level = "z"
 lto = false
 codegen-units = 1
 strip = true
-panic = "abort"
+# unwind（而非 abort）：任何线程的小 panic 不再整个闪退；
+# 事件处理入口有 catch_unwind 兜底，代价约 +150KB
+panic = "unwind"

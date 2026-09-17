@@ -233,7 +233,12 @@ impl TodoWin {
                 o
             })
             .collect();
-        let _ = serde_json::to_string_pretty(&v).map(|s| std::fs::write(&self.path, s));
+        let result = serde_json::to_string_pretty(&v)
+            .map_err(|e| e.to_string())
+            .and_then(|s| std::fs::write(&self.path, s).map_err(|e| e.to_string()));
+        if result.is_err() {
+            crate::dwarn("todo-save", "todos.json 保存失败（磁盘满或不可写？）");
+        }
     }
 
     /// 解析输入行 → (纯文本, 优先级, 截止)
