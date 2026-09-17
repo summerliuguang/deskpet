@@ -165,8 +165,23 @@ impl MenuWin {
             + entries.iter().filter(|e| e.id.is_none()).count() as i32 * sep_h
     }
 
-    /// 在光标处弹出；靠近屏幕下缘时改为向上一贴
+    /// 在光标处弹出；靠近屏幕下缘时改为向上一贴。
+    /// 小屏适配：整屏放不下时切紧凑度量（行高/间距收缩），仍溢出则截断顶部。
     pub fn open(mut self, at: (i32, i32), mon: MonRect) -> Self {
+        if self.total_h > mon.h - 8 {
+            self.item_h = ui(22).max(ui(16));
+            self.sep_h = ui(6).max(ui(4));
+            self.pad = ui(5).max(ui(3));
+            self.total_h = Self::height_of_scaled(&self.entries, self.item_h, self.pad, self.sep_h);
+            let _ = self.window.request_inner_size(PhysicalSize::new(
+                self.w as u32,
+                self.total_h.max(1) as u32,
+            ));
+            let _ = self.surface.resize(
+                NonZeroU32::new(self.w as u32).unwrap(),
+                NonZeroU32::new(self.total_h.max(1) as u32).unwrap(),
+            );
+        }
         let x = at.0.clamp(mon.x + 4, (mon.x + mon.w - self.w - 4).max(mon.x + 4));
         let mut y = at.1;
         if y + self.total_h > mon.y + mon.h - 4 {

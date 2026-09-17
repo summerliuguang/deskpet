@@ -13,7 +13,7 @@ use std::{
 };
 
 use deskpet::{
-    ai::{build_history, ChatMsg, Client, Role},
+    ai::{build_history, ChatErr, ChatMsg, Client, Role},
     bubble::BubbleWin,
     config::{Config, Settings},
     dwarn,
@@ -195,7 +195,9 @@ struct App {
 
     state: PetState,
     tick: u32,
-    state_len: u32,
+    /// 当前状态的结束时刻（None = 不自动结束，如睡/拖/飞/趴）；
+    /// tick 只作精灵动画相位，行为节奏由真实时间驱动（掉帧不再变慢）
+    state_until: Option<Instant>,
     idle_cycles: u32,
     dir: i32,
     pos: (i32, i32),
@@ -260,7 +262,7 @@ impl App {
             models: Vec::new(),
             state: PetState::Idle,
             tick: 0,
-            state_len: 60,
+            state_until: None,
             idle_cycles: 0,
             dir: 1,
             pos: (0, 0),
@@ -314,26 +316,34 @@ impl App {
     /// 状态切换唯一入口：统一重置 tick 与状态时长；Idle 睡意计数按原语义
     /// 维护（重进 Idle 清零）。瞬态计时（frame_at/reaction_end/hang_until）
     /// 由调用方按需清理——这里刻意不碰。
-    fn transition(&mut self, next: PetState, len_ticks: u32) {
+    fn transition(&mut self, next: PetState, dur: Option<Duration>) {
         if next == PetState::Idle && self.state != PetState::Idle {
             self.idle_cycles = 0;
         }
         self.state = next;
         self.tick = 0;
-        self.state_len = len_ticks;
+        self.state_until = dur.map(|d| Instant::now() + d);
     }
 
     fn enter_idle(&mut self) {
-        self.transition(PetState::Idle, self.rand_range(30, 90) as u32);
+        // 时长与旧"帧数×帧间隔"等价：30~90 tick × 600ms
+        self.transition(
+            PetState::Idle,
+            Some(Duration::from_millis(self.rand_range(30, 90) * 600)),
+        );
     }
 
     fn enter_walk(&mut self) {
-        self.transition(PetState::Walk, self.rand_range(20, 60) as u32);
+        // 20~60 tick × 180ms
+        self.transition(
+            PetState::Walk,
+            Some(Duration::from_millis(self.rand_range(20, 60) * 180)),
+        );
         self.dir = if self.rand() % 2 == 0 { 1 } else { -1 };
     }
 
-    fn enter_pose(&mut self, state: PetState, ticks: u32, msg: Option<&str>) {
-        self.transition(state, ticks);
+    fn enter_pose(&mut self, state: PetState, dur: Option<Duration>, msg: Option<&str>) {
+        self.transition(state, dur);
         self.frame_at = None;
         if let Some(m) = msg {
             self.bubble_show(m);
@@ -344,8 +354,7 @@ impl App {
     }
 
     fn enter_climb(&mut self, wall: i32) {
-        let len = self.state_len; // 爬墙不判时长，保持旧值即可
-        self.transition(PetState::Climb, len);
+        self.transition(PetState::Climb, None); // 爬墙不判时长
         self.climb_wall = wall;
         self.climb_vertical = -1;
         self.timers.cancel(Deadline::Hang);
@@ -353,9 +362,8 @@ impl App {
     }
 
     fn enter_sleep_by_bubble(&mut self, msg: &str) {
-        let len = self.state_len; // Sleep 不判时长
         self.bubble_show(msg);
-        self.transition(PetState::Sleep, len);
+        self.transition(PetState::Sleep, None); // 睡觉不自动结束
         self.frame_at = None;
         self.timers.cancel(Deadline::ReactionEnd);
         self.timers.cancel(Deadline::Hang);
@@ -416,7 +424,7 @@ impl App {
             PetState::Walk => self.advance_walk(window, ui_modal),
             PetState::Sitting | PetState::Stretch | PetState::Groom | PetState::Eat => {
                 self.tick += 1;
-                if self.tick >= self.state_len {
+                if self.state_until.map(|t| Instant::now() >= t).unwrap_or(false) {
                     self.enter_idle();
                 }
             }
@@ -441,9 +449,9 @@ impl App {
     /// 待机：到期按睡意入睡或去散步（输入框打开时原地陪打字，睡意不累积）
     fn advance_idle(&mut self) {
         self.tick += 1;
-        if self.tick >= self.state_len {
+        if self.state_until.map(|t| Instant::now() >= t).unwrap_or(false) {
             if self.idle_cycles >= 2 {
-                self.transition(PetState::Sleep, 0);
+                self.transition(PetState::Sleep, None);
             } else if self.input.is_none() {
                 self.idle_cycles += 1;
                 self.enter_walk();
@@ -476,19 +484,19 @@ impl App {
             }
             window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
         }
-        if self.tick >= self.state_len {
-            // 随机休息姿势：坐 / 伸懒腰 / 舔毛，小概率去趴窗
+        if self.state_until.map(|t| Instant::now() >= t).unwrap_or(false) {
+            // 随机休息姿势：坐 / 伸懒腰 / 舔毛，小概率去趴窗（时长与旧"帧数×帧间隔"等价）
             let roll = self.rand() % 100;
             if roll <= 9 && self.mon.h >= 240 {
                 self.perch_on_window();
             } else if roll <= 34 {
-                let t = self.rand_range(6, 14) as u32;
-                self.enter_pose(PetState::Sitting, t, None);
+                let dur = Duration::from_millis(self.rand_range(6, 14) * 600);
+                self.enter_pose(PetState::Sitting, Some(dur), None);
             } else if roll <= 49 {
-                self.enter_pose(PetState::Stretch, 4, Some("伸个懒腰～"));
+                self.enter_pose(PetState::Stretch, Some(Duration::from_millis(1600)), Some("伸个懒腰～"));
             } else if roll <= 69 {
-                let t = self.rand_range(8, 16) as u32;
-                self.enter_pose(PetState::Groom, t, None);
+                let dur = Duration::from_millis(self.rand_range(8, 16) * 600);
+                self.enter_pose(PetState::Groom, Some(dur), None);
             } else {
                 self.enter_idle();
             }
@@ -506,7 +514,7 @@ impl App {
         if done {
             // 从窗口上跳下来
             self.perch = None;
-            self.transition(PetState::Thrown, 0);
+            self.transition(PetState::Thrown, None);
             self.thrown_vel = (0.0, -0.1);
             self.frame_at = Some(Instant::now() + Duration::from_millis(THROWN_FRAME_MS));
             return;
@@ -585,7 +593,7 @@ impl App {
             self.resolve_mon();
             self.enter_idle();
             self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(700));
-            self.transition(PetState::Shocked, 0);
+            self.transition(PetState::Shocked, None);
             self.bubble_show("喵呜…晕了");
         }
     }
@@ -639,7 +647,7 @@ impl App {
 
     /// 气泡放头顶还是脚下：宠物贴近屏幕上缘时放脚下
     fn bubble_above(&self) -> bool {
-        self.pos.1 > self.mon.y + 90
+        self.pos.1 > self.mon.y + deskpet::ui(90)
     }
 
     fn bubble_show(&mut self, text: &str) {
@@ -712,7 +720,7 @@ impl App {
     }
 
     fn begin_drag(&mut self) {
-        self.transition(PetState::Dragged, 0);
+        self.transition(PetState::Dragged, None);
         self.drag_origin = self.pos;
         // 按下时窗口未动：本地坐标 == 全局抓取偏移，拖动全程锚定它
         self.grab = self.cursor;
@@ -759,7 +767,7 @@ impl App {
             let speed = (vx * vx + vy * vy).sqrt();
             if speed > FLING_SPEED_MIN {
                 // 甩飞！
-                self.transition(PetState::Thrown, 0);
+                self.transition(PetState::Thrown, None);
                 self.thrown_vel = (
                     vx.clamp(-1.3, 1.3),
                     vy.clamp(-1.3, 1.3) - 0.25, // 甩出时带点向上
@@ -816,7 +824,8 @@ impl App {
         if self.state == PetState::Sleep {
             self.wake_with("闻到小鱼干味了！");
         }
-        self.enter_pose(PetState::Eat, 10, Some("咔嚓咔嚓…小鱼干最棒了！"));
+        // 10 tick × 200ms = 2s
+        self.enter_pose(PetState::Eat, Some(Duration::from_millis(2000)), Some("咔嚓咔嚓…小鱼干最棒了！"));
         let cfg = self.cfg.clone();
         tts::speak(&self.client, &cfg, self.settings.voice, "小鱼干最棒了喵！");
     }
@@ -956,27 +965,42 @@ impl App {
                 let client = self.client.clone();
                 let proxy = self.proxy.clone();
                 std::thread::spawn(move || {
-                    // 最多 3 次尝试（间隔 1s/2s）：网络抖动或网关瞬时报错时自愈
-                    let mut result = Err("未发送".into());
-                    for (attempt, wait) in [0u64, 1, 2].iter().enumerate() {
-                        if *wait > 0 {
-                            std::thread::sleep(Duration::from_secs(*wait));
+                    // 最多 3 次尝试（间隔 1s/2s）：仅网络/限流/5xx 重试；
+                    // 密钥错误/模型不存在重试也不会好，直接给出可读文案
+                    let mut result: Result<String, ChatErr> = Ok(String::new());
+                    let mut ok = false;
+                    let mut attempts: u32 = 0;
+                    let mut last_err: Option<ChatErr> = None;
+                    for attempt in 0u32..3 {
+                        attempts = attempt + 1;
+                        if attempt > 0 {
+                            std::thread::sleep(Duration::from_secs(if attempt == 1 { 1 } else { 2 }));
                         }
                         match client.chat(&cfg, &model, &h) {
                             Ok(r) => {
                                 result = Ok(r);
+                                ok = true;
                                 break;
                             }
                             Err(e) => {
-                                result = if attempt == 2 {
-                                    Err(format!("{e}（重试 2 次仍失败）"))
-                                } else {
-                                    Err(e)
-                                };
+                                let retriable = e.retryable();
+                                last_err = Some(e);
+                                if !retriable {
+                                    break;
+                                }
                             }
                         }
                     }
-                    let _ = proxy.send_event(PetEvent::ChatReply(result));
+                    let reply = if ok {
+                        result.unwrap_or_default()
+                    } else {
+                        let mut msg = last_err.map(|e| e.message()).unwrap_or_default();
+                        if attempts > 1 {
+                            msg.push_str(&format!("（重试 {} 次仍失败）", attempts - 1));
+                        }
+                        msg
+                    };
+                    let _ = proxy.send_event(PetEvent::ChatReply(Ok(reply)));
                 });
             }
             None => {
@@ -1366,6 +1390,9 @@ impl App {
             pairs.push(("pos_y".into(), toml::Value::Integer(self.pos.1 as i64)));
         }
         pairs.push(("model_kind".into(), toml::Value::Integer(self.model_kind as i64)));
+        if let Some((name, _)) = self.models.get(self.model_kind) {
+            pairs.push(("model_name".into(), toml::Value::String(name.clone())));
+        }
         deskpet::config::persist_settings(&pairs);
     }
 
@@ -1386,6 +1413,7 @@ impl App {
                     };
                     ($pairs:ident, $st:ident, $n:ident, opt_i64, none) => {};
                     ($pairs:ident, $st:ident, $n:ident, opt_usize, none) => {};
+                    ($pairs:ident, $st:ident, $n:ident, opt_string, none) => {};
                 }
                 $(
                     persist_one!(pairs, st, $name, $ty, $d);
@@ -1426,7 +1454,7 @@ impl App {
             return;
         }
         if self.state != PetState::Sleep {
-            self.transition(PetState::Patted, 0);
+            self.transition(PetState::Patted, None);
             self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(1500));
         }
         self.bubble_show(msg);
@@ -1647,10 +1675,19 @@ impl ApplicationHandler<PetEvent> for App {
         self.pet_size = self.model.size().0 as i32;
         self.bubble = BubbleWin::create(el);
         self.refresh_model_registry();
-        if let Some(kind) = self.settings.model_kind {
-            if kind != 0 && kind < self.models.len() {
-                self.model_kind = kind;
-                self.switch_model(kind);
+        // 恢复上次模型：按名字匹配（增删模型后下标会漂移，名字不会）；
+        // 旧配置只有下标——迁移一次并把名字写回配置
+        let want = self.settings.model_name.clone().or_else(|| {
+            self.settings
+                .model_kind
+                .and_then(|k| self.models.get(k).map(|(n, _)| n.clone()))
+        });
+        if let Some(name) = want {
+            if let Some(i) = self.models.iter().position(|(n, _)| *n == name) {
+                if i != 0 {
+                    self.model_kind = i;
+                    self.switch_model(i);
+                }
             }
         }
         dlog(&format!(
@@ -2001,7 +2038,7 @@ impl ApplicationHandler<PetEvent> for App {
                     && self.state != PetState::Dragged
                     && self.state != PetState::Thrown
                 {
-                    self.transition(PetState::Patted, 0);
+                    self.transition(PetState::Patted, None);
                     self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(800));
                     self.frame_at = None;
                     let i = (self.rand() % PAD_REACTIONS.len() as u64) as usize;
@@ -2174,7 +2211,7 @@ impl App {
         let w = (rect.right - rect.left).max(self.pet_size + 8);
         let off = 4 + (self.rand() % ((w - self.pet_size - 8).max(1) as u64)) as i32;
         self.perch = Some((addr, off, 40)); // ~7 秒
-        self.enter_pose(PetState::Perch, u32::MAX, Some("爬上来啦～"));
+        self.enter_pose(PetState::Perch, None, Some("爬上来啦～")); // 时长由 perch ticks 决定
         self.perch_follow();
     }
 
@@ -2572,7 +2609,8 @@ fn ensure_single_instance() {
     use windows::Win32::Foundation::ERROR_ALREADY_EXISTS;
     use windows::Win32::System::Threading::CreateMutexW;
     unsafe {
-        let name: Vec<u16> = "Global\\deskpet-rs-single-instance\0"
+        // Local 命名空间：会话内单实例即可，且无需 Global 所需的额外权限
+        let name: Vec<u16> = "Local\\deskpet-rs-single-instance\0"
             .encode_utf16()
             .collect();
         let _ = CreateMutexW(None, false, PCWSTR(name.as_ptr()));

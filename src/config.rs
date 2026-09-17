@@ -49,6 +49,7 @@ macro_rules! for_each_setting {
             (pos_x, opt_i64, none)
             (pos_y, opt_i64, none)
             (model_kind, opt_usize, none)
+            (model_name, opt_string, none)
             (drink_minutes, u64, 45)
             (sit_minutes, u64, 90)
             (keyboard_link, bool, true)
@@ -71,6 +72,7 @@ macro_rules! setting_default {
     (u64, $d:expr) => { $d };
     (opt_i64, none) => { None };
     (opt_usize, none) => { None };
+    (opt_string, none) => { None };
 }
 
 macro_rules! default_fields {
@@ -92,6 +94,9 @@ macro_rules! parse_setting_value {
     ($v:ident, $name:ident, opt_usize, none) => {
         $v.get(stringify!($name)).and_then(|x| x.as_integer()).map(|x| x as usize)
     };
+    ($v:ident, $name:ident, opt_string, none) => {
+        $v.get(stringify!($name)).and_then(|x| x.as_str()).map(|x| x.to_string())
+    };
 }
 
 macro_rules! parse_fields {
@@ -107,8 +112,10 @@ pub struct Settings {
     /// 上次退出时的宠物位置（恢复用）
     pub pos_x: Option<i64>,
     pub pos_y: Option<i64>,
-    /// 上次选中的模型（注册表下标）
+    /// 上次选中的模型（注册表下标；旧版遗留，新版本以 model_name 为准）
     pub model_kind: Option<usize>,
+    /// 上次选中的模型名（增删模型后下标会漂移，名字不会）
+    pub model_name: Option<String>,
     pub drink_minutes: u64,
     pub sit_minutes: u64,
     pub keyboard_link: bool,
