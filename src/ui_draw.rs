@@ -15,20 +15,31 @@ pub fn blend(dst: u32, src: u32) -> u32 {
 
 /// 圆角矩形内含判定：四角为半径 r 的 1/4 圆内。
 /// y 从 0 起（局部坐标），调用方负责把窗口内的横带平移到 0。
+/// （注：menu 原实现的"四角候选 + cx<r"判定从未生效——面板一直显示直角；
+/// 本实现为标准圆角，menu/bubble 接入后视觉将首次出现真正的圆角。）
 pub fn rounded_inside(x: i32, y: i32, w: i32, h: i32, r: i32) -> bool {
     if x < 0 || y < 0 || x >= w || y >= h {
         return false;
     }
-    let (rx, ry) = (w - 1 - x, h - 1 - y);
-    for (cx, cy) in [(r, r), (rx, ry), (r, ry), (rx, r)] {
-        if cx < r && cy < r {
-            let (dx, dy) = (cx - r, cy - r);
-            if dx * dx + dy * dy > r * r {
-                return false;
-            }
-        }
+    // 只在四个 r×r 角区里做圆判定；否则必在内
+    let dx = if x < r {
+        r - x
+    } else if x >= w - r {
+        x - (w - 1 - r)
+    } else {
+        0
+    };
+    let dy = if y < r {
+        r - y
+    } else if y >= h - r {
+        y - (h - 1 - r)
+    } else {
+        0
+    };
+    if dx == 0 || dy == 0 {
+        return true;
     }
-    true
+    dx * dx + dy * dy <= r * r
 }
 
 /// 半透明底 + 1px 内描边的圆角面板（右键菜单底板同款画法）。

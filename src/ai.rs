@@ -8,6 +8,7 @@
 
 use crate::config::Config;
 use serde_json::{json, Value};
+use std::collections::HashMap;
 use sha2::{Digest, Sha256};
 use std::io::Read;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,6 +24,7 @@ fn tofu_check(known: Option<&[u8; 32]>, fp: &[u8; 32]) -> Result<bool, ()> {
 }
 
 /// 证书指纹存储：内存表 + known_hosts.txt 落盘（新增指纹即写回）
+#[derive(Debug)]
 struct TofuVerifier {
     store: Mutex<HashMap<String, [u8; 32]>>,
     store_path: Option<std::path::PathBuf>,
@@ -121,7 +123,7 @@ impl rustls::client::danger::ServerCertVerifier for TofuVerifier {
         _ocsp: &[u8],
         _now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
-        let host = server_name.to_str().unwrap_or("unknown").to_string();
+        let host = server_name.to_str().to_string();
         self.verify(&host, end_entity.as_ref()).map_err(rustls::Error::General)?;
         Ok(rustls::client::danger::ServerCertVerified::assertion())
     }

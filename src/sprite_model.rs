@@ -367,30 +367,33 @@ mod tests {
 
     /// 回归：无 climb 片段的模型爬墙时必须旋转 walk 帧兜底，
     /// 不能直立贴墙（曾经 Climb 直接映射 walk 直立播放）。
+    /// 用临时目录确定性构造（示例猫的 climb 片段是旧导出的直立帧，语义不可靠）。
     #[test]
     fn climb_without_clip_rotates_walk_frame() {
-        let base = std::path::Path::new("models");
-        let found = discover(base);
-        let Some((_, dir)) = found.iter().find(|(n, _)| n == "示例猫") else {
-            panic!("示例猫模型缺失");
-        };
-        let mut model = SpriteModel::load(dir.clone()).expect("示例猫应加载成功");
-        if model.cache.contains_key(&("climb".to_string(), 0)) {
-            return; // 模型自带预旋转 climb 片段，走另一条路径
+        let dir = std::env::temp_dir().join(format!("deskpet_climb_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("model.toml"), "name = \"climb_t\"\n").unwrap();
+        // 非对称帧（左上角有色块）：旋转后与原图不同，纯色帧旋转等于自身
+        let mut frame = vec![0u32; 64 * 64];
+        for y in 0..16 {
+            for x in 0..16 {
+                frame[y * 64 + x] = 0xFF112233;
+            }
         }
-        let walk = Pose {
-            state: PetState::Walk,
-            tick: 0,
-            gaze: (0, 0),
-            expr: 0,
-            costume: 0,
-            aux: 0,
-            typing: false,
-        };
+        encode_png(&dir.join("idle_0.png"), 64, 64, &frame).unwrap();
+        encode_png(&dir.join("walk_0.png"), 64, 64, &frame).unwrap();
+        let mut model = SpriteModel::load(dir.clone()).expect("应加载成功");
+        assert!(!model.has_clip("climb"), "夹具不应含 climb 片段");
+
+        let walk = Pose { state: PetState::Walk, tick: 0, gaze: (0, 0), expr: 0, costume: 0, aux: 0, typing: false };
         let upright = model.render(&walk).to_vec();
         let climb = model.render(&Pose { state: PetState::Climb, aux: -1, ..walk });
+        let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(climb.len(), 64 * 64);
         assert_ne!(upright.as_slice(), climb, "爬墙帧应是旋转后的 walk 帧");
+        // 空白帧旋转后仍非空
+        assert!(climb.iter().any(|&p| p != 0), "旋转兜底不能输出全透明帧");
     }
 
     /// 懒加载 + 预算逐出：超预算时最久未用的片段被逐出，再次用到重新解码

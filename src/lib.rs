@@ -72,7 +72,6 @@ pub fn set_ui_scale(s: f64) {
 }
 
 pub fn ui_scale() -> f64 {
-    use std::sync::atomic::Ordering;
     UI_SCALE.load(std::sync::atomic::Ordering::Relaxed) as f64 / 256.0
 }
 

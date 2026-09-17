@@ -12,6 +12,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use deskpet::for_each_setting;
 use deskpet::{
     ai::{build_history, ChatErr, ChatMsg, Client, Role},
     bubble::BubbleWin,
@@ -114,10 +115,6 @@ impl Timers {
 
     fn is_set(&self, d: Deadline) -> bool {
         self.slots[d as usize].is_some()
-    }
-
-    fn get(&self, d: Deadline) -> Option<Instant> {
-        self.slots[d as usize].map(|(t, _)| t)
     }
 
     /// 取出最早到期任务；recur 自动顺延到未来（单次自动清槽）
@@ -327,18 +324,14 @@ impl App {
 
     fn enter_idle(&mut self) {
         // 时长与旧"帧数×帧间隔"等价：30~90 tick × 600ms
-        self.transition(
-            PetState::Idle,
-            Some(Duration::from_millis(self.rand_range(30, 90) * 600)),
-        );
+        let dur = Duration::from_millis(self.rand_range(30, 90) * 600);
+        self.transition(PetState::Idle, Some(dur));
     }
 
     fn enter_walk(&mut self) {
         // 20~60 tick × 180ms
-        self.transition(
-            PetState::Walk,
-            Some(Duration::from_millis(self.rand_range(20, 60) * 180)),
-        );
+        let dur = Duration::from_millis(self.rand_range(20, 60) * 180);
+        self.transition(PetState::Walk, Some(dur));
         self.dir = if self.rand() % 2 == 0 { 1 } else { -1 };
     }
 
@@ -811,7 +804,7 @@ impl App {
         } else {
             ("喵嗷！踩到脚了！", 900)
         };
-        self.transition(if y < 20 { PetState::Patted } else { PetState::Shocked }, 0);
+        self.transition(if y < 20 { PetState::Patted } else { PetState::Shocked }, None);
         self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(dur));
         self.frame_at = None;
         self.bubble_show(msg);
@@ -844,8 +837,8 @@ impl App {
                 w.request_redraw();
             }
         }
-        self.timers
-            .set(Deadline::Whisper, Instant::now() + Duration::from_secs(self.rand_range(50, 140)));
+        let next = Instant::now() + Duration::from_secs(self.rand_range(50, 140));
+        self.timers.set(Deadline::Whisper, next);
     }
 
     // ---------- 绘制 ----------
@@ -1399,29 +1392,29 @@ impl App {
     fn persist_toggles(&self) {
         // 开关清单由 for_each_setting 宏维护（与 Default/parse 同源；
         // opt 字段不持久化——pos/model_kind 由 save_session 按语义单独写）
+        // persist_one 定义在 persist_fields 宏体之外：嵌套定义时内层规则头的
+        // $d 会被外层宏解析器误认为自身重复变量的引用（still repeating at this depth）
+        macro_rules! persist_one {
+            ($pairs:ident, $st:ident, $n:ident, bool, $d:tt) => {
+                $pairs.push((stringify!($n).into(), toml::Value::Boolean($st.$n)));
+            };
+            ($pairs:ident, $st:ident, $n:ident, u64, $d:tt) => {
+                $pairs.push((stringify!($n).into(), toml::Value::Integer($st.$n as i64)));
+            };
+            ($pairs:ident, $st:ident, $n:ident, opt_i64, none) => {};
+            ($pairs:ident, $st:ident, $n:ident, opt_usize, none) => {};
+            ($pairs:ident, $st:ident, $n:ident, opt_string, none) => {};
+        }
         macro_rules! persist_fields {
-            ($(($name:ident, $ty:ident, $d:expr))*) => {{
+            ({ $(($name:ident, $ty:ident, $d:tt))* }) => {{
                 let st = &self.settings;
                 #[allow(unused_mut)]
                 let mut pairs: Vec<(String, toml::Value)> = Vec::new();
-                macro_rules! persist_one {
-                    ($pairs:ident, $st:ident, $n:ident, bool, $d:expr) => {
-                        $pairs.push((stringify!($n).into(), toml::Value::Boolean($st.$n)));
-                    };
-                    ($pairs:ident, $st:ident, $n:ident, u64, $d:expr) => {
-                        $pairs.push((stringify!($n).into(), toml::Value::Integer($st.$n as i64)));
-                    };
-                    ($pairs:ident, $st:ident, $n:ident, opt_i64, none) => {};
-                    ($pairs:ident, $st:ident, $n:ident, opt_usize, none) => {};
-                    ($pairs:ident, $st:ident, $n:ident, opt_string, none) => {};
-                }
-                $(
-                    persist_one!(pairs, st, $name, $ty, $d);
-                )*
+                $( persist_one!(pairs, st, $name, $ty, $d); )*
                 deskpet::config::persist_settings(&pairs);
             }};
         }
-        deskpet::config::for_each_setting!(persist_fields);
+        for_each_setting!(persist_fields);
     }
 
     // ---------- 提醒 ----------
@@ -1509,6 +1502,417 @@ impl App {
         }
     }
 
+    /// 事件处理 panic 兜底：记录日志并恢复动画调度，宠物不闪退
+    /// （release 为 unwind 策略，工作线程 panic 也只死线程不死进程）
+    fn recover_from_panic(&mut self, stage: &str) {
+        dwarn(
+            &format!("panic-{stage}"),
+            &format!("事件处理 panic 已拦截（{stage}），宠物继续运行"),
+        );
+        self.press = None;
+        self.frame_at = Some(Instant::now() + Duration::from_millis(300));
+        if let Some(w) = &self.window {
+            w.request_redraw();
+        }
+    }
+
+    /// 冒烟模式：记录某窗口已完成一次渲染
+    fn mark_selftest_drawn(&mut self, which: &'static str) {
+        if self.selftest && !self.selftest_seen.contains(&which) {
+            self.selftest_seen.push(which);
+        }
+    }
+
+    fn window_event_inner(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        // 右键菜单窗口事件路由
+        if self.menu.as_ref().is_some_and(|m| m.window.id() == window_id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.mark_selftest_drawn("menu");
+            }
+            if let Some(menu) = &mut self.menu {
+                if menu.window.id() == window_id {
+                let outcome = match &event {
+                    WindowEvent::RedrawRequested => {
+                        menu.draw();
+                        MenuOutcome::None
+                    }
+                    e => menu.handle(e),
+                };
+                match outcome {
+                    MenuOutcome::None => {}
+                    MenuOutcome::Close => self.menu = None,
+                    MenuOutcome::Action { id, stay } => {
+                        self.menu_action(&id, el);
+                        if !stay {
+                            self.menu = None;
+                        } else {
+                            // stay 类动作（换装/表情/开关）处理后刷新标签，菜单保持打开
+                            let mut menu = self.menu.take().unwrap();
+                            let entries = match menu.page() {
+                                Page::Root => self.root_entries(),
+                                Page::Model => self.model_entries(),
+                                Page::Fun => self.fun_entries(),
+                                Page::Costume => self.costume_entries(),
+                                Page::Expr => self.expr_entries(),
+                                Page::Set => self.set_entries(),
+                            };
+                            menu.set_entries(entries);
+                            self.menu = Some(menu);
+                        }
+                    }
+                }
+                    return;
+                }
+            }
+        }
+
+        // 悬浮输入框事件路由
+        if self.input.as_ref().is_some_and(|i| i.window.id() == window_id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.mark_selftest_drawn("input");
+            }
+            if let Some(input) = &mut self.input {
+                if input.window.id() == window_id {
+                let action = match &event {
+                    WindowEvent::RedrawRequested => {
+                        input.draw();
+                        InputAction::None
+                    }
+                    e => input.handle(e),
+                };
+                match action {
+                    InputAction::None => {}
+                    InputAction::Close => self.input = None,
+                    InputAction::Send { text, image } => {
+                        if image.is_none() {
+                            if let Some(i) = &mut self.input {
+                                i.push_history(text.clone());
+                            }
+                        }
+                        self.send_chat(text, image);
+                    }
+                }
+                    return;
+                }
+            }
+        }
+        // 待办窗事件路由
+        if self.todo.as_ref().is_some_and(|t| t.window.id() == window_id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                self.mark_selftest_drawn("todo");
+            }
+            if let Some(todo) = &mut self.todo {
+                if todo.window.id() == window_id {
+                let action = match &event {
+                    WindowEvent::RedrawRequested => {
+                        todo.draw();
+                        TodoAction::None
+                    }
+                    e => todo.handle(e),
+                };
+                    if matches!(action, TodoAction::Close) {
+                        self.todo = None;
+                    }
+                    return;
+                }
+            }
+        }
+
+        let Some(window) = self.window.clone() else { return };
+        if window.id() != window_id {
+            return;
+        }
+        match event {
+            WindowEvent::RedrawRequested => {
+                self.mark_selftest_drawn("pet");
+                self.draw_pet(el);
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
+                self.on_left_press(&window);
+                self.schedule(el);
+            }
+            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
+                self.open_pet_menu(el);
+            }
+            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
+                self.on_left_release();
+                self.schedule(el);
+            }
+            WindowEvent::CursorMoved { position, .. } => {
+                self.cursor = (position.x, position.y);
+                if self.state == PetState::Dragged {
+                    if let Some(p) = &self.press {
+                        if p.moved || p.start.elapsed() >= Duration::from_millis(DRAG_START_MS) {
+                            // 锚定全局：CursorMoved 的本地坐标 + 事件时窗口位置
+                            // （self.pos 尚未更新，正是事件时刻的位置）= 鼠标全局坐标。
+                            // 旧实现拿本地坐标直接减抓取偏移，但窗口一动本地坐标系
+                            // 随之平移，稳态下窗口只有鼠标一半速度，越拖掉队越远。
+                            let nx = apply_drag(self.pos, self.grab, self.cursor);
+                            // 允许跨屏拖动：夹到所有显示器的联合包围盒
+                            let (min_x, min_y) = self
+                                .mons
+                                .iter()
+                                .fold((i32::MAX, i32::MAX), |a, m| (a.0.min(m.x), a.1.min(m.y)));
+                            let (max_x, max_y) = self.mons.iter().fold(
+                                (i32::MIN, i32::MIN),
+                                |a, m| (a.0.max(m.x + m.w - self.pet_size), a.1.max(m.y + m.h - self.pet_size)),
+                            );
+                            self.pos = (nx.0.clamp(min_x, max_x), nx.1.clamp(min_y, max_y));
+                            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                            self.drag_track
+                                .push((Instant::now(), self.pos.0 as f64, self.pos.1 as f64));
+                            if self.drag_track.len() > 16 {
+                                self.drag_track.remove(0);
+                            }
+                        }
+                    }
+                } else if let Some(p) = &mut self.press {
+                    let (lx, ly) = (self.cursor.0, self.cursor.1);
+                    if (lx - self.press_cursor.0).abs() > 6.0 || (ly - self.press_cursor.1).abs() > 6.0 {
+                        p.moved = true;
+                        // 移动超过阈值直接进入拖拽（不必等长按）
+                        if p.start.elapsed() >= Duration::from_millis(120) {
+                            self.begin_drag();
+                        }
+                    }
+                }
+            }
+            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
+                // 拖到不同缩放的显示器：按新缩放重设宠物窗口
+                deskpet::set_ui_scale(scale_factor);
+                // 内置像素模型的 sprite_scale 在构造时按当时的 ui_scale 定死，
+                // 缩放变化必须重建（保留换装/表情）；帧序列模型 64px 固定不受影响
+                if let Some((_, ModelSource::Builtin(kind))) = self.models.get(self.model_kind).map(|(n, s)| (n.clone(), s.clone())) {
+                    let (costume, expr) = (self.model.costume(), self.model.expression());
+                    self.model = make_model(kind);
+                    self.model.set_costume(costume);
+                    self.model.set_expression(expr);
+                }
+                self.pet_size = self.model.size().0 as i32;
+                let _ = inner_size_writer.request_inner_size(PhysicalSize::new(
+                    self.pet_size as u32,
+                    self.pet_size as u32,
+                ));
+                if let Some(surface) = &mut self.surface {
+                    let _ = surface.resize(
+                        NonZeroU32::new(self.pet_size as u32).unwrap(),
+                        NonZeroU32::new(self.pet_size as u32).unwrap(),
+                    );
+                }
+                // 派生 UI 关闭/重建，重开时按新缩放
+                self.rebuild_derived_for_scale(el);
+                window.request_redraw();
+                dlog(&format!("缩放变化 → {scale_factor:.2}"));
+            }
+            WindowEvent::Ime(Ime::Enabled) | WindowEvent::Ime(Ime::Disabled) => {}
+            WindowEvent::CloseRequested => {
+                self.save_session();
+                el.exit();
+            }
+            _ => {}
+        }
+    }
+
+    fn user_event_inner(&mut self, el: &ActiveEventLoop, event: PetEvent) {
+        match event {
+            PetEvent::FullscreenChanged(fs) => self.set_hidden(el, fs),
+            PetEvent::MonitorsChanged => {
+                self.refresh_monitors(el);
+            }
+            PetEvent::Hotkey(id) => {
+                if !self.settings.hotkeys {
+                    return;
+                }
+                match id {
+                    0 => self.menu_action("set-quiet", el),
+                    1 => self.ensure_todo(el),
+                    2 => self.ensure_input(el),
+                    3 => self.set_hidden(el, !self.hidden),
+                    4 => {
+                        self.save_session();
+                        el.exit();
+                    }
+                    _ => {}
+                }
+            }
+            PetEvent::ChatReply(r) => {
+                self.chat_pending = false;
+                self.timers.cancel(Deadline::Think);
+                let reply = match r {
+                    Ok(t) => t,
+                    Err(e) => format!("出错了：{e}"),
+                };
+                // 全屏/勿扰时不出声（游戏/视频不被打断；文字气泡照常）
+                if !self.hidden && !self.settings.quiet {
+                    let cfg = self.cfg.clone();
+                    tts::speak(&self.client, &cfg, self.settings.voice, &reply);
+                }
+                self.chat_history
+                    .push(ChatMsg { role: Role::Pet, text: reply.clone(), image: None });
+                self.trim_history();
+                self.log_chat("pet", &reply);
+                let shown: String = reply.chars().take(120).collect();
+                self.bubble_show(&shown);
+                if let Some(i) = &mut self.input {
+                    i.clear_pending();
+                }
+            }
+            PetEvent::Typing => {
+                if self.settings.keyboard_link
+                    && !self.hidden
+                    && (self.state == PetState::Idle || self.state == PetState::Walk)
+                {
+                    self.typing_until = Some(Instant::now() + Duration::from_millis(150));
+                    let early = Instant::now() + Duration::from_millis(100);
+                    if self.frame_at.map(|t| t > early).unwrap_or(true) {
+                        self.frame_at = Some(early);
+                    }
+                }
+            }
+            PetEvent::Gamepad => {
+                if self.settings.gamepad_link
+                    && !self.hidden
+                    && self.state != PetState::Sleep
+                    && self.state != PetState::Dragged
+                    && self.state != PetState::Thrown
+                {
+                    self.transition(PetState::Patted, None);
+                    self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(800));
+                    self.frame_at = None;
+                    let i = (self.rand() % PAD_REACTIONS.len() as u64) as usize;
+                    self.bubble_show(PAD_REACTIONS[i]);
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+        }
+        self.schedule(el);
+    }
+
+    /// 统一定时器分发：每种 Deadline 的到期动作（逻辑自原 about_to_wait 各段原样迁移）
+    fn fire_deadline(&mut self, _el: &ActiveEventLoop, kind: Deadline) {
+        match kind {
+            Deadline::BubbleHide => self.bubble_hide(),
+            Deadline::ReactionEnd => {
+                if self.state == PetState::Patted || self.state == PetState::Shocked {
+                    self.enter_idle();
+                    if let Some(w) = &self.window {
+                        w.request_redraw();
+                    }
+                }
+            }
+            Deadline::Whisper => self.whisper(),
+            Deadline::Hang => {
+                if self.state == PetState::Climb {
+                    self.climb_vertical = 1;
+                    self.frame_at = Some(Instant::now() + Duration::from_millis(180));
+                }
+            }
+            Deadline::Drink => self.fire_reminder(true),
+            Deadline::Sit => self.fire_reminder(false),
+            Deadline::Autosave => self.save_session(),
+            Deadline::DueCheck => {
+                // 清单开着时查到期项，气泡提醒一次
+                if let Some(todo) = &mut self.todo {
+                    if let Some(text) = todo.poll_due() {
+                        if !self.hidden && !self.settings.quiet {
+                            self.bubble_show(&format!("叮咚！待办到期：{text}"));
+                        }
+                    }
+                }
+            }
+            Deadline::Onboard => {
+                if let Some(diag) = self.startup_diag.take() {
+                    self.bubble_show(&diag);
+                } else if !self.settings.onboarded {
+                    self.settings.onboarded = true;
+                    self.persist_toggles();
+                    self.bubble_show("右键我打开菜单喵！长按拖动、双击睡觉，拖张图片给我看看～");
+                }
+            }
+            Deadline::Think => {
+                if !self.chat_pending {
+                    self.timers.cancel(Deadline::Think);
+                    return;
+                }
+                self.think_frame = (self.think_frame + 1) % 3;
+                let dots = format!(
+                    "{}{}",
+                    "·".repeat(self.think_frame as usize + 1),
+                    " ".repeat(2 - self.think_frame as usize)
+                );
+                let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
+                if let Some(b) = &mut self.bubble {
+                    b.show_now(&dots, pp, ps, mon, above);
+                }
+            }
+        }
+    }
+
+    fn about_to_wait_inner(&mut self, el: &ActiveEventLoop) {
+        // 托盘 / 右键菜单事件（muda 全局通道）
+        #[cfg(windows)]
+        while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
+            self.menu_action(&ev.id().0, el);
+        }
+
+        let now = Instant::now();
+        // 长按 → 开始拖拽
+        if let Some(p) = self.press {
+            if self.state != PetState::Dragged
+                && self.state != PetState::Sleep
+                && now.duration_since(p.start) >= Duration::from_millis(DRAG_START_MS)
+            {
+                self.begin_drag();
+            }
+        }
+        // 统一定时器：到期任务逐个 fire（fire 内可能设置新任务）
+        while let Some(kind) = self.timers.pop_due(now) {
+            self.fire_deadline(el, kind);
+        }
+        // 打字机气泡逐字推进
+        if let Some(b) = &mut self.bubble {
+            if let Some(t) = b.next_tick_at() {
+                if now >= t {
+                    b.advance_typing();
+                }
+            }
+        }
+        // 动画帧到期
+        if let Some(t) = self.frame_at {
+            if now >= t {
+                self.frame_at = None;
+                if let Some(w) = &self.window {
+                    w.request_redraw();
+                }
+            }
+        }
+        // 冒烟模式：全部窗口渲染到位 → 通过退出；超时 → 失败退出
+        if self.selftest {
+            #[cfg(windows)]
+            let required: &[&str] = &["pet", "menu", "input", "todo"];
+            #[cfg(not(windows))]
+            let required: &[&str] = &["pet", "input", "todo"];
+            if required.iter().all(|r| self.selftest_seen.contains(r)) {
+                dlog("SELFTEST PASS：全部窗口渲染探活通过");
+                std::process::exit(0);
+            }
+            if let Some(dl) = self.selftest_deadline {
+                if Instant::now() >= dl {
+                    let missing: Vec<&str> = required
+                        .iter()
+                        .filter(|r| !self.selftest_seen.contains(r))
+                        .copied()
+                        .collect();
+                    dlog(&format!("SELFTEST FAILED：未收到渲染的窗口 {missing:?}"));
+                    std::process::exit(1);
+                }
+            }
+        }
+        self.schedule(el);
+    }
+
     // ---------- 派生窗口统一操作（新增窗口只需在这三个方法里登记） ----------
 
     /// 全屏遮挡/快捷键隐藏：收起全部派生窗口
@@ -1550,8 +1954,9 @@ impl App {
 
     fn set_hidden(&mut self, el: &ActiveEventLoop, hide: bool) {
         self.hidden = hide;
-        let Some(w) = &self.window else { return };
-        w.set_visible(!hide);
+        // Arc clone（非借用）：hide/restore_derived 需要 &mut self
+        let Some(window) = self.window.clone() else { return };
+        window.set_visible(!hide);
         if hide {
             // 瞬态状态立即落地，避免隐藏期间动画停摆、恢复后冻结
             self.press = None;
@@ -1561,7 +1966,7 @@ impl App {
             ) {
                 self.perch = None;
                 self.pos.1 = self.mon_bottom();
-                w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+                window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
                 self.timers.cancel(Deadline::Hang);
                 self.climb_wall = 0;
                 self.enter_idle();
@@ -1572,7 +1977,7 @@ impl App {
             el.set_control_flow(ControlFlow::Wait);
         } else {
             self.restore_derived();
-            w.request_redraw();
+            window.request_redraw();
         }
     }
 }
@@ -1752,217 +2157,12 @@ impl ApplicationHandler<PetEvent> for App {
         }
     }
 
-    /// 事件处理 panic 兜底：记录日志并恢复动画调度，宠物不闪退
-    /// （release 为 unwind 策略，工作线程 panic 也只死线程不死进程）
-    fn recover_from_panic(&mut self, stage: &str) {
-        dwarn(
-            &format!("panic-{stage}"),
-            &format!("事件处理 panic 已拦截（{stage}），宠物继续运行"),
-        );
-        self.press = None;
-        self.frame_at = Some(Instant::now() + Duration::from_millis(300));
-        if let Some(w) = &self.window {
-            w.request_redraw();
-        }
-    }
-
     fn window_event(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.window_event_inner(el, window_id, event);
         }));
         if result.is_err() {
             self.recover_from_panic("window_event");
-        }
-    }
-
-    /// 冒烟模式：记录某窗口已完成一次渲染
-    fn mark_selftest_drawn(&mut self, which: &'static str) {
-        if self.selftest && !self.selftest_seen.contains(&which) {
-            self.selftest_seen.push(which);
-        }
-    }
-
-    fn window_event_inner(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
-        // 右键菜单窗口事件路由
-        if let Some(menu) = &mut self.menu {
-            if menu.window.id() == window_id {
-                if matches!(event, WindowEvent::RedrawRequested) {
-                    self.mark_selftest_drawn("menu");
-                }
-                let outcome = match &event {
-                    WindowEvent::RedrawRequested => {
-                        menu.draw();
-                        MenuOutcome::None
-                    }
-                    e => menu.handle(e),
-                };
-                match outcome {
-                    MenuOutcome::None => {}
-                    MenuOutcome::Close => self.menu = None,
-                    MenuOutcome::Action { id, stay } => {
-                        self.menu_action(&id, el);
-                        if !stay {
-                            self.menu = None;
-                        } else {
-                            // stay 类动作（换装/表情/开关）处理后刷新标签，菜单保持打开
-                            let mut menu = self.menu.take().unwrap();
-                            let entries = match menu.page() {
-                                Page::Root => self.root_entries(),
-                                Page::Model => self.model_entries(),
-                                Page::Fun => self.fun_entries(),
-                                Page::Costume => self.costume_entries(),
-                                Page::Expr => self.expr_entries(),
-                                Page::Set => self.set_entries(),
-                            };
-                            menu.set_entries(entries);
-                            self.menu = Some(menu);
-                        }
-                    }
-                }
-                return;
-            }
-        }
-
-        // 悬浮输入框事件路由
-        if let Some(input) = &mut self.input {
-            if input.window.id() == window_id {
-                if matches!(event, WindowEvent::RedrawRequested) {
-                    self.mark_selftest_drawn("input");
-                }
-                let action = match &event {
-                    WindowEvent::RedrawRequested => {
-                        input.draw();
-                        InputAction::None
-                    }
-                    e => input.handle(e),
-                };
-                match action {
-                    InputAction::None => {}
-                    InputAction::Close => self.input = None,
-                    InputAction::Send { text, image } => {
-                        if image.is_none() {
-                            if let Some(i) = &mut self.input {
-                                i.push_history(text.clone());
-                            }
-                        }
-                        self.send_chat(text, image);
-                    }
-                }
-                return;
-            }
-        }
-        // 待办窗事件路由
-        if let Some(todo) = &mut self.todo {
-            if todo.window.id() == window_id {
-                if matches!(event, WindowEvent::RedrawRequested) {
-                    self.mark_selftest_drawn("todo");
-                }
-                let action = match &event {
-                    WindowEvent::RedrawRequested => {
-                        todo.draw();
-                        TodoAction::None
-                    }
-                    e => todo.handle(e),
-                };
-                if matches!(action, TodoAction::Close) {
-                    self.todo = None;
-                }
-                return;
-            }
-        }
-
-        let Some(window) = self.window.clone() else { return };
-        if window.id() != window_id {
-            return;
-        }
-        match event {
-            WindowEvent::RedrawRequested => {
-                self.mark_selftest_drawn("pet");
-                self.draw_pet(el);
-            }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Left, .. } => {
-                self.on_left_press(&window);
-                self.schedule(el);
-            }
-            WindowEvent::MouseInput { state: ElementState::Pressed, button: MouseButton::Right, .. } => {
-                self.open_pet_menu(el);
-            }
-            WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                self.on_left_release();
-                self.schedule(el);
-            }
-            WindowEvent::CursorMoved { position, .. } => {
-                self.cursor = (position.x, position.y);
-                if self.state == PetState::Dragged {
-                    if let Some(p) = &self.press {
-                        if p.moved || p.start.elapsed() >= Duration::from_millis(DRAG_START_MS) {
-                            // 锚定全局：CursorMoved 的本地坐标 + 事件时窗口位置
-                            // （self.pos 尚未更新，正是事件时刻的位置）= 鼠标全局坐标。
-                            // 旧实现拿本地坐标直接减抓取偏移，但窗口一动本地坐标系
-                            // 随之平移，稳态下窗口只有鼠标一半速度，越拖掉队越远。
-                            let nx = apply_drag(self.pos, self.grab, self.cursor);
-                            // 允许跨屏拖动：夹到所有显示器的联合包围盒
-                            let (min_x, min_y) = self
-                                .mons
-                                .iter()
-                                .fold((i32::MAX, i32::MAX), |a, m| (a.0.min(m.x), a.1.min(m.y)));
-                            let (max_x, max_y) = self.mons.iter().fold(
-                                (i32::MIN, i32::MIN),
-                                |a, m| (a.0.max(m.x + m.w - self.pet_size), a.1.max(m.y + m.h - self.pet_size)),
-                            );
-                            self.pos = (nx.0.clamp(min_x, max_x), nx.1.clamp(min_y, max_y));
-                            window.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
-                            self.drag_track
-                                .push((Instant::now(), self.pos.0 as f64, self.pos.1 as f64));
-                            if self.drag_track.len() > 16 {
-                                self.drag_track.remove(0);
-                            }
-                        }
-                    }
-                } else if let Some(p) = &mut self.press {
-                    let (lx, ly) = (self.cursor.0, self.cursor.1);
-                    if (lx - self.press_cursor.0).abs() > 6.0 || (ly - self.press_cursor.1).abs() > 6.0 {
-                        p.moved = true;
-                        // 移动超过阈值直接进入拖拽（不必等长按）
-                        if p.start.elapsed() >= Duration::from_millis(120) {
-                            self.begin_drag();
-                        }
-                    }
-                }
-            }
-            WindowEvent::ScaleFactorChanged { scale_factor, mut inner_size_writer } => {
-                // 拖到不同缩放的显示器：按新缩放重设宠物窗口
-                deskpet::set_ui_scale(scale_factor);
-                // 内置像素模型的 sprite_scale 在构造时按当时的 ui_scale 定死，
-                // 缩放变化必须重建（保留换装/表情）；帧序列模型 64px 固定不受影响
-                if let Some((_, ModelSource::Builtin(kind))) = self.models.get(self.model_kind).map(|(n, s)| (n.clone(), s.clone())) {
-                    let (costume, expr) = (self.model.costume(), self.model.expression());
-                    self.model = make_model(kind);
-                    self.model.set_costume(costume);
-                    self.model.set_expression(expr);
-                }
-                self.pet_size = self.model.size().0 as i32;
-                let _ = inner_size_writer.request_inner_size(PhysicalSize::new(
-                    self.pet_size as u32,
-                    self.pet_size as u32,
-                ));
-                if let Some(surface) = &mut self.surface {
-                    let _ = surface.resize(
-                        NonZeroU32::new(self.pet_size as u32).unwrap(),
-                        NonZeroU32::new(self.pet_size as u32).unwrap(),
-                    );
-                }
-                // 派生 UI 关闭/重建，重开时按新缩放
-                self.rebuild_derived_for_scale(el);
-                window.request_redraw();
-                dlog(&format!("缩放变化 → {scale_factor:.2}"));
-            }
-            WindowEvent::Ime(Ime::Enabled) | WindowEvent::Ime(Ime::Disabled) => {}
-            WindowEvent::CloseRequested => {
-                self.save_session();
-                el.exit();
-            }
-            _ => {}
         }
     }
 
@@ -1975,143 +2175,6 @@ impl ApplicationHandler<PetEvent> for App {
         }
     }
 
-    fn user_event_inner(&mut self, el: &ActiveEventLoop, event: PetEvent) {
-        match event {
-            PetEvent::FullscreenChanged(fs) => self.set_hidden(el, fs),
-            PetEvent::MonitorsChanged => {
-                self.refresh_monitors(el);
-            }
-            PetEvent::Hotkey(id) => {
-                if !self.settings.hotkeys {
-                    return;
-                }
-                match id {
-                    0 => self.menu_action("set-quiet", el),
-                    1 => self.ensure_todo(el),
-                    2 => self.ensure_input(el),
-                    3 => self.set_hidden(el, !self.hidden),
-                    4 => {
-                        self.save_session();
-                        el.exit();
-                    }
-                    _ => {}
-                }
-            }
-            PetEvent::ChatReply(r) => {
-                self.chat_pending = false;
-                self.timers.cancel(Deadline::Think);
-                let reply = match r {
-                    Ok(t) => t,
-                    Err(e) => format!("出错了：{e}"),
-                };
-                // 全屏/勿扰时不出声（游戏/视频不被打断；文字气泡照常）
-                if !self.hidden && !self.settings.quiet {
-                    let cfg = self.cfg.clone();
-                    tts::speak(&self.client, &cfg, self.settings.voice, &reply);
-                }
-                self.chat_history
-                    .push(ChatMsg { role: Role::Pet, text: reply.clone(), image: None });
-                self.trim_history();
-                self.log_chat("pet", &reply);
-                let shown: String = reply.chars().take(120).collect();
-                self.bubble_show(&shown);
-                if let Some(i) = &mut self.input {
-                    i.clear_pending();
-                }
-            }
-            PetEvent::Typing => {
-                if self.settings.keyboard_link
-                    && !self.hidden
-                    && (self.state == PetState::Idle || self.state == PetState::Walk)
-                {
-                    self.typing_until = Some(Instant::now() + Duration::from_millis(150));
-                    let early = Instant::now() + Duration::from_millis(100);
-                    if self.frame_at.map(|t| t > early).unwrap_or(true) {
-                        self.frame_at = Some(early);
-                    }
-                }
-            }
-            PetEvent::Gamepad => {
-                if self.settings.gamepad_link
-                    && !self.hidden
-                    && self.state != PetState::Sleep
-                    && self.state != PetState::Dragged
-                    && self.state != PetState::Thrown
-                {
-                    self.transition(PetState::Patted, None);
-                    self.timers.set(Deadline::ReactionEnd, Instant::now() + Duration::from_millis(800));
-                    self.frame_at = None;
-                    let i = (self.rand() % PAD_REACTIONS.len() as u64) as usize;
-                    self.bubble_show(PAD_REACTIONS[i]);
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-        }
-        self.schedule(el);
-    }
-
-    /// 统一定时器分发：每种 Deadline 的到期动作（逻辑自原 about_to_wait 各段原样迁移）
-    fn fire_deadline(&mut self, el: &ActiveEventLoop, kind: Deadline) {
-        match kind {
-            Deadline::BubbleHide => self.bubble_hide(),
-            Deadline::ReactionEnd => {
-                if self.state == PetState::Patted || self.state == PetState::Shocked {
-                    self.enter_idle();
-                    if let Some(w) = &self.window {
-                        w.request_redraw();
-                    }
-                }
-            }
-            Deadline::Whisper => self.whisper(),
-            Deadline::Hang => {
-                if self.state == PetState::Climb {
-                    self.climb_vertical = 1;
-                    self.frame_at = Some(Instant::now() + Duration::from_millis(180));
-                }
-            }
-            Deadline::Drink => self.fire_reminder(true),
-            Deadline::Sit => self.fire_reminder(false),
-            Deadline::Autosave => self.save_session(),
-            Deadline::DueCheck => {
-                // 清单开着时查到期项，气泡提醒一次
-                if let Some(todo) = &mut self.todo {
-                    if let Some(text) = todo.poll_due() {
-                        if !self.hidden && !self.settings.quiet {
-                            self.bubble_show(&format!("叮咚！待办到期：{text}"));
-                        }
-                    }
-                }
-            }
-            Deadline::Onboard => {
-                if let Some(diag) = self.startup_diag.take() {
-                    self.bubble_show(&diag);
-                } else if !self.settings.onboarded {
-                    self.settings.onboarded = true;
-                    self.persist_toggles();
-                    self.bubble_show("右键我打开菜单喵！长按拖动、双击睡觉，拖张图片给我看看～");
-                }
-            }
-            Deadline::Think => {
-                if !self.chat_pending {
-                    self.timers.cancel(Deadline::Think);
-                    return;
-                }
-                self.think_frame = (self.think_frame + 1) % 3;
-                let dots = format!(
-                    "{}{}",
-                    "·".repeat(self.think_frame as usize + 1),
-                    " ".repeat(2 - self.think_frame as usize)
-                );
-                let (pp, ps, mon, above) = (self.pos, self.pet_size, self.mon, self.bubble_above());
-                if let Some(b) = &mut self.bubble {
-                    b.show_now(&dots, pp, ps, mon, above);
-                }
-            }
-        }
-    }
-
     fn about_to_wait(&mut self, el: &ActiveEventLoop) {
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             self.about_to_wait_inner(el);
@@ -2121,68 +2184,6 @@ impl ApplicationHandler<PetEvent> for App {
         }
     }
 
-    fn about_to_wait_inner(&mut self, el: &ActiveEventLoop) {
-        // 托盘 / 右键菜单事件（muda 全局通道）
-        #[cfg(windows)]
-        while let Ok(ev) = tray_icon::menu::MenuEvent::receiver().try_recv() {
-            self.menu_action(&ev.id().0, el);
-        }
-
-        let now = Instant::now();
-        // 长按 → 开始拖拽
-        if let Some(p) = self.press {
-            if self.state != PetState::Dragged
-                && self.state != PetState::Sleep
-                && now.duration_since(p.start) >= Duration::from_millis(DRAG_START_MS)
-            {
-                self.begin_drag();
-            }
-        }
-        // 统一定时器：到期任务逐个 fire（fire 内可能设置新任务）
-        while let Some(kind) = self.timers.pop_due(now) {
-            self.fire_deadline(el, kind);
-        }
-        // 打字机气泡逐字推进
-        if let Some(b) = &mut self.bubble {
-            if let Some(t) = b.next_tick_at() {
-                if now >= t {
-                    b.advance_typing();
-                }
-            }
-        }
-        // 动画帧到期
-        if let Some(t) = self.frame_at {
-            if now >= t {
-                self.frame_at = None;
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
-            }
-        }
-        // 冒烟模式：全部窗口渲染到位 → 通过退出；超时 → 失败退出
-        if self.selftest {
-            #[cfg(windows)]
-            let required: &[&str] = &["pet", "menu", "input", "todo"];
-            #[cfg(not(windows))]
-            let required: &[&str] = &["pet", "input", "todo"];
-            if required.iter().all(|r| self.selftest_seen.contains(r)) {
-                dlog("SELFTEST PASS：全部窗口渲染探活通过");
-                std::process::exit(0);
-            }
-            if let Some(dl) = self.selftest_deadline {
-                if Instant::now() >= dl {
-                    let missing: Vec<&str> = required
-                        .iter()
-                        .filter(|r| !self.selftest_seen.contains(r))
-                        .copied()
-                        .collect();
-                    dlog(&format!("SELFTEST FAILED：未收到渲染的窗口 {missing:?}"));
-                    std::process::exit(1);
-                }
-            }
-        }
-        self.schedule(el);
-    }
 }
 
 
@@ -2405,6 +2406,7 @@ fn monitor_fingerprint() -> u64 {
 }
 
 #[cfg(not(windows))]
+#[allow(dead_code)] // 非 windows 下 watcher 为空实现，占位保持签名一致
 fn monitor_fingerprint() -> u64 {
     0
 }
