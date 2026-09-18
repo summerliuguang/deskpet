@@ -257,28 +257,29 @@ impl MenuWin {
                 MenuOutcome::None
             }
             WindowEvent::MouseInput { state: ElementState::Released, button: MouseButton::Left, .. } => {
-                // MouseInput 不带坐标，用最近一次 CursorMoved 记录的位置
+                // MouseInput 不带坐标，用最近一次 CursorMoved 记录的位置。
+                // row_at 给的是"第几个可见行"；rows 元组第三位存的才是 entries
+                // 下标——分隔线不占行，含分隔线的页面两者错位，必须经 idx 中转
+                // （曾直接 entries.get(rows 下标)：点"互动"命中分隔线、点"换装"
+                //   实际执行"模型"）。
                 let row = self.row_at(self.cursor.1);
                 self.pressed = None;
                 self.window.request_redraw();
-                match row.and_then(|r| self.entries.get(r).and_then(|e| e.id.clone())) {
-                    Some(id) => {
+                let entry = row
+                    .and_then(|r| self.rows.get(r))
+                    .and_then(|&(_, _, idx)| self.entries.get(idx).cloned());
+                match entry {
+                    Some(e) => {
+                        let id = e.id.clone().unwrap_or_default();
                         if let Some(page) = page_from_id(&id) {
                             self.switch_page(page);
                             self.draw();
                             MenuOutcome::None
+                        } else if e.stay {
+                            self.hover = None;
+                            MenuOutcome::Action { id, stay: true }
                         } else {
-                            let stay = self
-                                .entries
-                                .get(row.unwrap_or(usize::MAX))
-                                .map(|e| e.stay)
-                                .unwrap_or(false);
-                            if stay {
-                                self.hover = None;
-                                MenuOutcome::Action { id, stay: true }
-                            } else {
-                                MenuOutcome::Action { id, stay: false }
-                            }
+                            MenuOutcome::Action { id, stay: false }
                         }
                     }
                     None => MenuOutcome::None, // 点在分隔线/空白上，不关闭
@@ -392,6 +393,42 @@ mod tests {
         assert!(!src.contains(idx.as_str()), "缓冲索引禁止用逻辑常量 W，应统一 self.w");
         assert!(!src.contains(bound.as_str()), "边界判定禁止用逻辑常量 W，应统一 self.w");
         assert!(!src.contains(alloc.as_str()), "缓冲分配禁止用逻辑常量 W");
+    }
+
+    /// 回归：点击命中必须经 rows 里存的 entries 下标中转。
+    /// 含分隔线的页面 rows 下标 ≠ entries 下标——曾直接
+    /// entries.get(rows 下标) 导致点"互动"命中分隔线、点"换装"执行"模型"。
+    #[test]
+    fn released_row_maps_through_stored_entry_index() {
+        let entries = vec![
+            Entry::item("chat", "对话"),
+            Entry::item("todo", "待办"),
+            Entry::sep(),
+            Entry::sub(Page::Fun, "互动"),
+            Entry::sub(Page::Costume, "换装"),
+            Entry::stay("remind", "提醒：开"),
+        ];
+        // 模拟 draw 的行构造：分隔线（id=None）不占行
+        let mut rows: Vec<(i32, i32, usize)> = Vec::new();
+        for (idx, e) in entries.iter().enumerate() {
+            if e.id.is_some() {
+                rows.push((0, 28, idx));
+            }
+        }
+        assert_eq!(rows.len(), 5, "分隔线不占行");
+
+        let hit = |visible_row: usize| -> Option<String> {
+            rows.get(visible_row)
+                .and_then(|&(_, _, idx)| entries.get(idx))
+                .and_then(|e| e.id.clone())
+        };
+        // 视觉第 1/2 行直接对上；视觉第 3 行是"互动"（entries[3]，不是分隔线）
+        assert_eq!(hit(0).as_deref(), Some("chat"));
+        assert_eq!(hit(1).as_deref(), Some("todo"));
+        assert_eq!(hit(2).as_deref(), Some("page:Fun"), "点'互动'应命中互动");
+        assert_eq!(hit(3).as_deref(), Some("page:Costume"), "点'换装'应命中换装");
+        assert_eq!(hit(4).as_deref(), Some("remind"), "点'提醒'应命中提醒");
+        assert_eq!(hit(5), None, "越界不命中");
     }
 
     /// 缩放后的行高计算：条目与分隔线分开计数，分隔线不占条目高度
