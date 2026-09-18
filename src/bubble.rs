@@ -173,6 +173,17 @@ impl BubbleWin {
         }
         self.visible = true;
         self.window.set_visible(true);
+        // request_inner_size 异步生效：本帧 present 时窗口可能还是旧尺寸，
+        // BitBlt 按旧窗口尺寸取样会把内容错位成"只剩尾部"。请求下一帧重画，
+        // 窗口尺寸生效后的这一帧才是用户真正看到的
+        self.window.request_redraw();
+    }
+
+    /// 窗口 RedrawRequested 时按当前内容重画（尺寸生效后的修正帧）
+    pub fn redraw(&mut self) {
+        if self.visible {
+            self.draw();
+        }
     }
 
     /// 打字机推进一步；返回 true 表示仍在打字中

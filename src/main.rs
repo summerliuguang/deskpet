@@ -1534,6 +1534,15 @@ impl App {
     }
 
     fn window_event_inner(&mut self, el: &ActiveEventLoop, window_id: WindowId, event: WindowEvent) {
+        // 气泡窗口重绘路由（尺寸生效后的修正帧）
+        if self.bubble.as_ref().is_some_and(|b| b.window.id() == window_id) {
+            if matches!(event, WindowEvent::RedrawRequested) {
+                if let Some(b) = &mut self.bubble {
+                    b.redraw();
+                }
+            }
+            return;
+        }
         // 右键菜单窗口事件路由
         if self.menu.as_ref().is_some_and(|m| m.window.id() == window_id) {
             if matches!(event, WindowEvent::RedrawRequested) {
