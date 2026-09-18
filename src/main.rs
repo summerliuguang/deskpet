@@ -920,6 +920,11 @@ impl App {
     /// 上一条还没回复时不并发请求（回复会乱序、思考动画错乱），
     /// 被拒的文本放回输入框不丢字。
     fn send_chat(&mut self, text: String, image: Option<String>) {
+        dlog(&format!(
+            "聊天发送：{}{}",
+            if self.cfg.ai_ready() { "（AI）" } else { "（离线）" },
+            text.chars().take(20).collect::<String>()
+        ));
         if self.chat_pending {
             self.bubble_show("等我说完这句嘛～");
             if let Some(i) = &mut self.input {
@@ -1547,10 +1552,13 @@ impl App {
                     MenuOutcome::None => {}
                     MenuOutcome::Close => self.menu = None,
                     MenuOutcome::Action { id, stay } => {
-                        self.menu_action(&id, el);
+                        // 先关菜单（销毁窗口）再执行动作：动作里打开的输入框
+                        // 才不会被随后的菜单窗口销毁抢走焦点
                         if !stay {
                             self.menu = None;
-                        } else {
+                        }
+                        self.menu_action(&id, el);
+                        if stay {
                             // stay 类动作（换装/表情/开关）处理后刷新标签，菜单保持打开
                             let mut menu = self.menu.take().unwrap();
                             let entries = match menu.page() {
@@ -2067,7 +2075,7 @@ impl ApplicationHandler<PetEvent> for App {
         dlog("渲染就绪（softbuffer）");
         #[cfg(windows)]
         {
-            let ok = hwnd_of(&window).map(|h| unsafe { enable_colorkey(h) }).unwrap_or(false);
+            let ok = deskpet::hwnd_of(&window).map(|h| unsafe { enable_colorkey(h) }).unwrap_or(false);
             dlog(if ok { "色键分层已启用（透明区域点击穿透）" } else { "色键分层启用失败" });
         }
         if surface
@@ -2639,14 +2647,6 @@ use windows::Win32::Foundation::GetLastError;
 /// 注意：美术素材里不要出现 RGB(254,1,254)。
 pub const COLORKEY: u32 = 0xFFFE01FE;
 
-#[cfg(windows)]
-fn hwnd_of(window: &Window) -> Option<isize> {
-    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    match window.window_handle().ok()?.as_raw() {
-        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
-        _ => None,
-    }
-}
 
 #[cfg(windows)]
 unsafe fn enable_colorkey(hwnd: isize) -> bool {

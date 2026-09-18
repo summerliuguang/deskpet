@@ -122,6 +122,49 @@ fn append_log(line: &str) {
     }
 }
 
+/// Windows 下强制把键盘焦点给到指定窗口。
+/// 桌宠进程几乎从不是前台进程（宠物/菜单都是 NOACTIVATE 窗口，不抢前台），
+/// winit 的 focus_window()（SetForegroundWindow）会被前台锁定策略拒绝，
+/// 输入框看得见却收不到键盘/IME——AttachThreadInput 到当前前台线程再
+/// SetFocus 是热键/桌宠类软件的标准解法。
+#[cfg(windows)]
+pub fn force_focus_window(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::System::Threading::GetCurrentThreadId;
+    use windows::Win32::System::Threading::AttachThreadInput;
+    use windows::Win32::UI::Input::KeyboardAndMouse::SetFocus;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId,
+    };
+    unsafe {
+        let h = HWND(hwnd as *mut core::ffi::c_void);
+        let fg = GetForegroundWindow();
+        let my_tid = GetCurrentThreadId();
+        let fg_tid = if fg.is_invalid() { 0 } else { GetWindowThreadProcessId(fg, None) };
+        let attached = fg_tid != 0 && fg_tid != my_tid;
+        if attached {
+            let _ = AttachThreadInput(my_tid, fg_tid, true);
+        }
+        let _ = BringWindowToTop(h);
+        let _ = SetFocus(Some(h));
+        if attached {
+            let _ = AttachThreadInput(my_tid, fg_tid, false);
+        }
+    }
+}
+
+#[cfg(not(windows))]
+pub fn force_focus_window(_hwnd: isize) {}
+
+/// 从 winit 窗口取 Win32 HWND（isize）
+pub fn hwnd_of(window: &winit::window::Window) -> Option<isize> {
+    use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+    match window.window_handle().ok()?.as_raw() {
+        RawWindowHandle::Win32(h) => Some(h.hwnd.get()),
+        _ => None,
+    }
+}
+
 /// softbuffer 0.4 的泛型参数直接持有窗口句柄，用 Arc<Window> 保证 'static
 pub type SbSurface =
     softbuffer::Surface<std::sync::Arc<winit::window::Window>, std::sync::Arc<winit::window::Window>>;

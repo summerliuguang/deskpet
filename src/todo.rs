@@ -268,6 +268,9 @@ impl TodoWin {
         self.window.set_outer_position(PhysicalPosition::new(x, y));
         self.window.set_visible(true);
         self.window.focus_window();
+        if let Some(h) = crate::hwnd_of(&self.window) {
+            crate::force_focus_window(h);
+        }
         self.draw();
     }
 

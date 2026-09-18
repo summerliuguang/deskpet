@@ -125,6 +125,10 @@ impl InputBox {
         self.window.set_outer_position(PhysicalPosition::new(x, y));
         self.window.set_visible(true);
         self.window.focus_window();
+        // winit 的 focus 可能被前台锁定拒绝（桌宠进程非前台），强制补一次
+        if let Some(h) = crate::hwnd_of(&self.window) {
+            crate::force_focus_window(h);
+        }
         self.draw();
     }
 
