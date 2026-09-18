@@ -3,9 +3,9 @@
 //!
 //! Config = AI 接入参数；Settings = 行为开关（可在菜单"设置"页实时切换并持久化）。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     /// OpenAI 兼容入口，含 /v1（自建网关或任意 OpenAI 兼容服务）
     pub base_url: String,
@@ -171,6 +171,51 @@ impl Settings {
     }
 }
 
+/// 首次运行自动生成的配置模板：**全行注释 = 全部使用默认值（离线模式）**。
+/// 想启用 AI 聊天/语音，取消 base_url/api_key 注释填入网关与密钥即可；
+/// 之后在菜单里切换开关会经 persist_settings 重写本文件（注释会丢，已填的值保留）。
+pub const DEFAULT_TEMPLATE: &str = r#"# deskpet 配置（首次运行自动生成；本文件所有行都是注释 = 全部使用默认值）
+#
+# ---- 启用 AI 聊天 / 语音（当前未启用）----
+# 取消下面两行注释，填入你的 OpenAI 兼容网关地址与密钥，然后重启桌宠：
+# base_url = "https://your-gateway.example/v1"
+# api_key = "在这里填你的密钥"
+# 聊天模型（默认走免费模型）；拖图识别用的视觉模型（免费模型不支持图片）
+# model = "nvidia/nemotron-3-super-120b-a12b:free"
+# vision_model = "deepseek-flash"
+# 猫的名字与性格提示词
+# pet_name = "团子"
+# system_prompt = "你是趴在主人 Windows 桌面上的小猫，名字叫团子。用中文回复，简短可爱，不超过 60 字，可以偶尔用颜文字。"
+# 语音音色（mimo_default/冰糖/茉莉/苏打/白桦…）
+# tts_voice = "mimo_default"
+#
+# ---- 行为开关（右键菜单可实时切换并自动写回本文件）----
+# voice = true          # 语音播报总开关
+# quiet = false         # 勿扰模式（不主动说话不出声）
+# typewriter = true     # 打字机气泡
+# chat_log = true       # 聊天记录落盘 chat_log.jsonl（隐私敏感可关）
+# hotkeys = true        # 全局快捷键 Ctrl+Shift+D勿扰/T待办/C聊天/H隐藏/Q退出
+# drink_minutes = 45    # 喝水提醒间隔（0=关）
+# sit_minutes = 90      # 久坐提醒间隔（0=关）
+"#;
+
+/// 若目标路径不存在则写入模板；已存在（含空文件）绝不覆盖。
+/// 返回是否实际写入了文件。
+pub fn ensure_default_template_at(path: &Path) -> bool {
+    if path.exists() {
+        return false;
+    }
+    std::fs::write(path, DEFAULT_TEMPLATE).is_ok()
+}
+
+/// 首次运行时在 exe 旁生成配置模板（不影响本次启动的默认值解析）
+pub fn ensure_default_template() -> bool {
+    match candidate_paths().first().cloned() {
+        Some(path) => ensure_default_template_at(&path),
+        None => false,
+    }
+}
+
 fn candidate_paths() -> Vec<PathBuf> {
     let mut v = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
@@ -311,6 +356,41 @@ mod tests {
     fn parse_config_empty_vision_model_falls_back() {
         assert_eq!(parse_config("").vision_model, Some("deepseek-flash".into()));
         assert_eq!(parse_config("vision_model = \"\"").vision_model, Some("deepseek-flash".into()));
+    }
+
+    /// 回归：自动生成的模板全行注释，解析必须等于全默认（离线模式）——
+    /// 生成模板这个动作不能改变任何运行行为
+    #[test]
+    fn default_template_parses_to_offline_defaults() {
+        assert_eq!(parse_config(DEFAULT_TEMPLATE), Config::default());
+        let st = parse_settings(DEFAULT_TEMPLATE);
+        let d = Settings::default();
+        assert_eq!(st.voice, d.voice);
+        assert_eq!(st.quiet, d.quiet);
+        assert_eq!(st.hotkeys, d.hotkeys);
+        assert_eq!(st.typewriter, d.typewriter);
+        assert_eq!(st.chat_log, d.chat_log);
+        assert_eq!(st.drink_minutes, d.drink_minutes);
+        assert_eq!(st.sit_minutes, d.sit_minutes);
+    }
+
+    /// ensure_default_template_at：不存在才写，已存在绝不覆盖
+    #[test]
+    fn template_only_created_when_missing() {
+        let dir = std::env::temp_dir().join(format!("deskpet_tpl_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deskpet.toml");
+        assert!(ensure_default_template_at(&path), "首次应写入");
+        assert!(path.exists());
+        let first = std::fs::read_to_string(&path).unwrap();
+        assert!(!ensure_default_template_at(&path), "已存在不得覆盖");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), first);
+        // 用户手填的配置也不会被覆盖
+        std::fs::write(&path, "api_key = \"x\"").unwrap();
+        assert!(!ensure_default_template_at(&path));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "api_key = \"x\"");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

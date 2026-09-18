@@ -2728,6 +2728,9 @@ fn main() {
         dlog("SELFTEST：逻辑自检通过，进入窗口渲染探活");
     }
     let text = deskpet::config::load_text();
+    if text.is_none() && deskpet::config::ensure_default_template() {
+        dlog("首次运行：已生成配置模板 deskpet.toml（全注释 = 离线默认）");
+    }
     let cfg = text.as_deref().map(deskpet::config::parse_config).unwrap_or_default();
     let settings = deskpet::config::parse_settings(text.as_deref().unwrap_or(""));
     let startup_diag = deskpet::config::config_diag(text.as_deref());

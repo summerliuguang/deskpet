@@ -58,9 +58,11 @@
 
 ## 使用
 
-1. 把 `deskpet.exe` 拷到 Windows 10/11 x64 机器，双击运行
-2. AI/语音功能：复制 `deskpet.toml.example` 为 `deskpet.toml` 放在 exe 旁边，
-   填 `api_key`（LiteGate 管理台签发；也可用环境变量 `DESKPET_API_KEY`）
+1. 把 `deskpet.exe` 拷到 Windows 10/11 x64 机器，双击运行——**单文件即用**，
+   首次运行自动在 exe 旁生成全注释的 `deskpet.toml` 模板（离线默认）；
+   其余数据文件（todos.json/chat_log.jsonl/日志）按需自动创建
+2. AI/语音功能：打开 `deskpet.toml` 取消 `base_url`/`api_key` 注释填入
+   网关与密钥后重启（也可用环境变量 `DESKPET_API_KEY`）
 3. 右键猫 = 主菜单（对话/待办/互动/外观/提醒/语音/睡觉/关于/退出）
 
 ## 构建（Linux 交叉编译）
