@@ -1,5 +1,6 @@
 pub mod ai;
 pub mod bubble;
+pub mod cat32;
 pub mod inputbox;
 pub mod config;
 pub mod input;

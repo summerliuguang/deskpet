@@ -35,8 +35,7 @@ use winit::{
     window::{Window, WindowId, WindowLevel},
 };
 
-const WALK_STEP: i32 = 4;
-const CLIMB_STEP: i32 = 2;
+
 const DRAG_FRAME_MS: u64 = 140;
 const THROWN_FRAME_MS: u64 = 16;
 const DRAG_START_MS: u64 = 260;
@@ -308,6 +307,15 @@ impl App {
         self.mon.y + self.mon.h - self.pet_size
     }
 
+    /// 按体型比例的移动步长（64px 猫 = 4px/帧，512px 猫 = 32px/帧）
+    fn walk_step(&self) -> i32 {
+        (self.pet_size / 16).max(2)
+    }
+
+    fn climb_step(&self) -> i32 {
+        (self.pet_size / 32).max(1)
+    }
+
     // ---------- 状态机 ----------
 
     /// 状态切换唯一入口：统一重置 tick 与状态时长；Idle 睡意计数按原语义
@@ -415,7 +423,16 @@ impl App {
         match self.state {
             PetState::Idle => self.advance_idle(),
             PetState::Walk => self.advance_walk(window, ui_modal),
-            PetState::Sitting | PetState::Stretch | PetState::Groom | PetState::Eat => {
+            PetState::Sitting
+            | PetState::Stretch
+            | PetState::Groom
+            | PetState::Eat
+            | PetState::Roll
+            | PetState::PlayBall
+            | PetState::TailChase
+            | PetState::Wave
+            | PetState::Purr
+            | PetState::Startle => {
                 self.tick += 1;
                 if self.state_until.map(|t| Instant::now() >= t).unwrap_or(false) {
                     self.enter_idle();
@@ -458,20 +475,20 @@ impl App {
     fn advance_walk(&mut self, window: &Window, ui_modal: bool) {
         self.tick += 1;
         if !ui_modal {
-            self.pos.0 += self.dir * WALK_STEP;
+            self.pos.0 += self.dir * self.walk_step();
             if self.pos.0 < self.mon.x {
                 self.pos.0 = self.mon.x;
                 self.dir = 1;
                 // 撞左墙：概率爬墙
                 if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                    self.pos.0 += WALK_STEP;
+                    self.pos.0 += self.walk_step();
                     self.enter_climb(-1);
                 }
             } else if self.pos.0 > self.mon.x + self.mon.w - self.pet_size {
                 self.pos.0 = self.mon.x + self.mon.w - self.pet_size;
                 self.dir = -1;
                 if self.mon.h >= 240 && self.rand() % 10 < 4 {
-                    self.pos.0 -= WALK_STEP;
+                    self.pos.0 -= self.walk_step();
                     self.enter_climb(1);
                 }
             }
@@ -523,13 +540,13 @@ impl App {
         if self.timers.is_set(Deadline::Hang) {
             // 在顶上挂一会儿（到期由 Deadline::Hang fire 解除）
         } else if self.climb_vertical < 0 {
-            self.pos.1 -= CLIMB_STEP;
+            self.pos.1 -= self.climb_step();
             if self.pos.1 <= self.mon.y + 2 {
                 self.pos.1 = self.mon.y + 2;
                 self.timers.set(Deadline::Hang, Instant::now() + Duration::from_millis(1200));
             }
         } else {
-            self.pos.1 += CLIMB_STEP;
+            self.pos.1 += self.climb_step();
             if self.pos.1 >= self.mon_bottom() {
                 self.pos.1 = self.mon_bottom();
                 // 落地后往屏幕里挪，结束爬墙
@@ -797,9 +814,10 @@ impl App {
 
     fn click_zone(&mut self) {
         let y = self.cursor.1 as i32;
-        let (msg, dur) = if y < 20 {
+        // 分区按体型比例：上 1/3 摸头、中 1/3 戳肚子、下 1/3 踩脚
+        let (msg, dur) = if y < self.pet_size / 3 {
             ("好舒服～再摸摸！", 1400u64)
-        } else if y < 46 {
+        } else if y < self.pet_size * 2 / 3 {
             ("呜哇！别戳肚子啦！", 1100)
         } else {
             ("喵嗷！踩到脚了！", 900)
@@ -1114,6 +1132,14 @@ impl App {
         vec![
             Entry::back(),
             Entry::stay("pet-feed", "喂小鱼干"),
+            Entry::sep(),
+            Entry::item("act-roll", "打个滚"),
+            Entry::item("act-ball", "玩球球"),
+            Entry::item("act-tail", "追尾巴"),
+            Entry::item("act-wave", "招招手"),
+            Entry::item("act-purr", "呼噜噜"),
+            Entry::item("act-startle", "炸个毛"),
+            Entry::sep(),
             Entry::item("pet-perch", "趴到窗口上"),
             Entry::item("pet-throw", "扔个窗口"),
             Entry::stay("pet-say", "说句话"),
@@ -1355,6 +1381,12 @@ impl App {
                     self.model.info().name
                 ));
             }
+            "act-roll" => self.enter_pose(PetState::Roll, Some(Duration::from_millis(700)), Some("打个滚～")),
+            "act-ball" => self.enter_pose(PetState::PlayBall, Some(Duration::from_millis(800)), Some("球球是我的！")),
+            "act-tail" => self.enter_pose(PetState::TailChase, Some(Duration::from_millis(800)), Some("尾巴抓不住！")),
+            "act-wave" => self.enter_pose(PetState::Wave, Some(Duration::from_millis(600)), Some("嗨～")),
+            "act-purr" => self.enter_pose(PetState::Purr, Some(Duration::from_millis(900)), Some("呼噜呼噜…")),
+            "act-startle" => self.enter_pose(PetState::Startle, Some(Duration::from_millis(600)), Some("喵嗷！！")),
             "pet-perch" => self.perch_on_window(),
             other if other.starts_with("model-") => {
                 if let Ok(i) = other.strip_prefix("model-").unwrap().parse::<usize>() {

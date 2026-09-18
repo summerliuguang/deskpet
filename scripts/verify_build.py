@@ -26,6 +26,8 @@ checks = {
     '打字机气泡': '打字机气泡开启'.encode(),
     '聊天落盘开关': '聊天记录落盘已关闭'.encode(),
     '配置模板自动生成': '首次运行自动生成'.encode(),
+    '512 高清猫': '打个滚'.encode(),
+    '互动动作页': '呼噜呼噜'.encode(),
 }
 missing = [name for name, sig in checks.items() if sig not in exe]
 print(f'{path}: {len(exe)} 字节')

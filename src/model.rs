@@ -8,6 +8,7 @@
 //! （models/ 目录放 PNG 帧），主程序状态机、菜单、交互零改动。
 
 use crate::sprites;
+use crate::cat32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PetState {
@@ -31,6 +32,18 @@ pub enum PetState {
     Eat,
     /// 趴在别的窗口顶边上
     Perch,
+    /// 打滚（躺平左右滚）
+    Roll,
+    /// 玩球（拍小球）
+    PlayBall,
+    /// 追尾巴（原地转）
+    TailChase,
+    /// 招手
+    Wave,
+    /// 呼噜（起伏冒爱心）
+    Purr,
+    /// 炸毛惊跳
+    Startle,
 }
 
 /// 渲染输入。aux 的含义由状态决定：Climb 时为墙面方向（-1 左墙 / 1 右墙）。
@@ -90,19 +103,31 @@ pub struct PixelPet {
 impl PixelPet {
     pub fn new(kind: usize) -> Self {
         let species = sprites::species_of(kind);
-        // 像素画只在整数倍缩放下锐利：逻辑 16px × 4 倍基准，随 UI 缩放取最近整数倍
-        let sprite_scale = (4.0 * crate::ui_scale()).round().max(1.0) as i32;
+        let is_cat = species == sprites::Species::Cat;
+        let (sprite_scale, capacity) = if is_cat {
+            // 高清猫：32x32 逻辑格 × 16 = 512x512，固定倍率（不随 DPI 缩放）
+            (16, 512 * 512)
+        } else {
+            // 其他物种：16x16 逻辑格 × 整数倍缩放（随 DPI 取最近整数倍）
+            let sc = (4.0 * crate::ui_scale()).round().max(1.0) as i32;
+            (sc, (16 * sc) as usize * (16 * sc) as usize)
+        };
+        let expressions: Vec<String> = if is_cat {
+            cat32::CAT_EXPRESSIONS.iter().map(|s| s.to_string()).collect()
+        } else {
+            sprites::EXPRESSIONS.iter().map(|s| s.to_string()).collect()
+        };
         Self {
             species,
             sprite_scale,
             costume: 0,
             expr: 0,
-            buf: Vec::with_capacity((16 * sprite_scale) as usize * (16 * sprite_scale) as usize),
-            rot_buf: Vec::with_capacity((16 * sprite_scale) as usize * (16 * sprite_scale) as usize),
+            buf: Vec::with_capacity(capacity),
+            rot_buf: Vec::with_capacity(capacity),
             info: ModelInfo {
                 name: sprites::SPECIES_NAMES[kind.min(sprites::SPECIES_NAMES.len() - 1)].into(),
                 costumes: sprites::palettes(species).iter().map(|c| c.name.to_string()).collect(),
-                expressions: sprites::EXPRESSIONS.iter().map(|s| s.to_string()).collect(),
+                expressions,
             },
         }
     }
@@ -124,13 +149,22 @@ impl PetModel for PixelPet {
     }
 
     fn size(&self) -> (u32, u32) {
-        let side = (16 * self.sprite_scale) as u32;
+        let side = if self.species == sprites::Species::Cat {
+            512
+        } else {
+            (16 * self.sprite_scale) as u32
+        };
         (side, side)
     }
 
     fn render(&mut self, pose: &Pose) -> &[u32] {
         let pals = sprites::palettes(self.species);
         let palette = &pals[self.costume.min(pals.len() - 1)];
+        if self.species == sprites::Species::Cat {
+            // 高清猫管线（cat32）
+            cat32::render_into(&mut self.buf, pose, palette, self.expr);
+            return &self.buf;
+        }
         let frame = sprites::pose_to_frame(pose);
         sprites::render_frame_into(
             &mut self.buf,
@@ -155,6 +189,9 @@ impl PetModel for PixelPet {
             PetState::Thrown => 16,
             PetState::Groom | PetState::Eat => 200,
             PetState::Stretch => 400,
+            PetState::Roll | PetState::PlayBall | PetState::TailChase => 160,
+            PetState::Wave | PetState::Purr => 260,
+            PetState::Startle => 500,
             _ => 600,
         }
     }

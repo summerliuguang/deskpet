@@ -466,6 +466,10 @@ pub fn pose_to_frame(pose: &crate::model::Pose) -> Frame {
                 Frame::IdleOpen
             }
         }
+        Roll | PlayBall | Purr | TailChase | Wave => {
+            if pose.tick % 8 < 6 { Frame::Happy } else { Frame::SitA }
+        }
+        Startle => Frame::Shock,
     }
 }
 

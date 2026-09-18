@@ -41,6 +41,9 @@ pub fn clip_name(state: &PetState) -> &'static str {
         PetState::Stretch => "stretch",
         PetState::Groom => "groom",
         PetState::Eat => "eat",
+        PetState::Roll | PetState::PlayBall | PetState::TailChase => "happy",
+        PetState::Wave | PetState::Purr => "sit",
+        PetState::Startle => "shock",
     }
 }
 
