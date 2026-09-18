@@ -43,7 +43,7 @@ impl Part {
     }
 }
 
-const T: u32 = u32::MAX; // 透明标记（逻辑画布内部值）
+const T: u32 = 0; // 透明标记（部件颜色全部 0xFF 开头，不会撞 0；白=0xFFFFFFFF 不再误判透明）
 
 struct Canvas {
     px: Vec<u32>,

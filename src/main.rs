@@ -1097,6 +1097,26 @@ impl App {
                 }
             },
         }
+        // 同步窗口与 surface 尺寸（模型间尺寸不同：猫 512、其他 64）
+        let side = self.model.size().0 as i32;
+        if side != self.pet_size {
+            self.pet_size = side;
+            if let Some(w) = &self.window {
+                let _ = w.request_inner_size(PhysicalSize::new(side as u32, side as u32));
+            }
+            if let Some(surface) = &mut self.surface {
+                let _ = surface.resize(
+                    std::num::NonZeroU32::new(side as u32).unwrap(),
+                    std::num::NonZeroU32::new(side as u32).unwrap(),
+                );
+            }
+            // 位置夹回屏幕（大猫换小猫时防止悬在屏外）
+            self.pos.0 = self.pos.0.min(self.mon.x + self.mon.w - side).max(self.mon.x);
+            self.pos.1 = self.pos.1.min(self.mon_bottom()).max(self.mon.y);
+            if let Some(w) = &self.window {
+                w.set_outer_position(PhysicalPosition::new(self.pos.0, self.pos.1));
+            }
+        }
         self.bubble_show(&format!("嗨！我是{}～", name));
         if let Some(w) = &self.window {
             w.request_redraw();
@@ -2046,6 +2066,10 @@ impl ApplicationHandler<PetEvent> for App {
         deskpet::set_ui_scale(el.primary_monitor().map(|m| m.scale_factor()).unwrap_or(1.0));
         dlog(&format!("UI 缩放：{:.2}", deskpet::ui_scale()));
 
+        // 窗口尺寸必须按当前模型创建（512 高清猫 vs 64 经典物种）；
+        // 曾用初值 64 创建、之后才更新 pet_size——512 画面 present 进
+        // 64 窗口只剩透明左上角，整只猫"消失"
+        self.pet_size = self.model.size().0 as i32;
         #[cfg_attr(not(windows), allow(unused_mut))] // windows 下会追加 with_skip_taskbar
         let mut attrs = Window::default_attributes()
             .with_inner_size(PhysicalSize::new(self.pet_size as u32, self.pet_size as u32))
