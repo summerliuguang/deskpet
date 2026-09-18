@@ -138,6 +138,8 @@ enum Paw { Down, Up }
 
 /// 一次 draw_cat 的全部可变参数（与设计原型一一对应）
 struct CatPose {
+    /// 目光跟随：瞳孔偏移（-1/0/1 逻辑格）
+    gaze: (i32, i32),
     eye: Eye,
     mouth_open: bool,
     tongue: bool,
@@ -160,6 +162,7 @@ struct CatPose {
 impl Default for CatPose {
     fn default() -> Self {
         Self {
+            gaze: (0, 0),
             eye: Eye::Open,
             mouth_open: false,
             tongue: false,
@@ -234,10 +237,11 @@ fn draw_cat(c: &mut Canvas, p: &CatPose, pal: &Palette) {
     let ey = hy - 1;
     match p.eye {
         Eye::Open => {
-            c.ellipse(exl, ey, 2, 3, Part::Eye, pal);
-            c.ellipse(exr, ey, 2, 3, Part::Eye, pal);
-            c.rect(exl - 1, ey - 2, exl - 1, ey - 1, Part::White, pal);
-            c.rect(exr - 1, ey - 2, exr - 1, ey - 1, Part::White, pal);
+            let (gx, gy) = p.gaze;
+            c.ellipse(exl + gx, ey + gy, 2, 3, Part::Eye, pal);
+            c.ellipse(exr + gx, ey + gy, 2, 3, Part::Eye, pal);
+            c.rect(exl + gx - 1, ey + gy - 2, exl + gx - 1, ey + gy - 1, Part::White, pal);
+            c.rect(exr + gx - 1, ey + gy - 2, exr + gx - 1, ey + gy - 1, Part::White, pal);
         }
         Eye::Happy => {
             c.rect(exl - 2, ey - 1, exl - 1, ey - 1, Part::Eye, pal);
@@ -357,6 +361,7 @@ fn apply_expr(p: &mut CatPose, expr: usize) {
 pub fn render_into(out: &mut Vec<u32>, pose: &Pose, pal: &Palette, expr: usize) {
     let mut c = Canvas::new();
     let mut p = CatPose::default();
+    p.gaze = (pose.gaze.0.clamp(-1, 1), pose.gaze.1.clamp(-1, 1));
     let t = pose.tick;
 
     match pose.state {
@@ -377,10 +382,10 @@ pub fn render_into(out: &mut Vec<u32>, pose: &Pose, pal: &Palette, expr: usize) 
         }
         PetState::Sleep => {
             p.eye = Eye::Closed;
-            p.lying = false;
-            p.tail = Tail::Wrap;
+            p.lying = true; // 蜷缩躺平（头在左）
+            p.tail = Tail::Out;
             p.zzz = t % 4 < 2;
-            p.body_dy = if t % 4 < 2 { 0 } else { 1 };
+            p.belly = false;
             if expr > 0 { apply_expr(&mut p, expr); } else { p.eye = Eye::Closed; }
         }
         PetState::Patted => {

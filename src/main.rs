@@ -568,12 +568,14 @@ impl App {
     /// 被甩飞：抛物线 + 弹跳衰减，落稳后晕一下
     fn advance_thrown(&mut self, window: &Window, ui_modal: bool) {
         let dt = THROWN_FRAME_MS as f32;
+        // 重力按体型比例：512 大猫与 64 小猫的抛物线手感一致
+        let gravity = GRAVITY * (self.pet_size as f32 / 64.0);
         let (mut vx, mut vy) = self.thrown_vel;
         let mut landed = false;
         if !ui_modal {
             self.pos.0 += (vx * dt) as i32;
             self.pos.1 += (vy * dt) as i32;
-            vy += GRAVITY * dt;
+            vy += gravity * dt;
             if self.pos.0 < self.mon.x {
                 self.pos.0 = self.mon.x;
                 vx = -vx * 0.7;
@@ -794,7 +796,8 @@ impl App {
             self.resolve_mon();
             self.enter_idle();
             self.frame_at = None;
-            if moved_px > 24 {
+            // 阈值按体型比例（64px 猫 = 24px）
+            if moved_px > self.pet_size * 3 / 8 {
                 self.bubble_show("呼…安全着陆！");
             }
             self.save_session();
