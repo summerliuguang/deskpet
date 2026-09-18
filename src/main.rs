@@ -1002,8 +1002,13 @@ impl App {
                 self.chat_history
                     .push(ChatMsg { role: Role::Pet, text: "还没接入 AI".into(), image: None });
                 self.trim_history();
-                self.bubble_show("喵呜～我还没接入 AI！在 deskpet.exe 旁边放一个 deskpet.toml（照抄 .example 填 api_key）就能聊天啦");
+                // 文案与自动生成的模板一致（模板已自动生成，不存在 .example）
+                const OFFLINE_HINT: &str = "打开我旁边的 deskpet.toml，取消 base_url 和 api_key 两行注释并填入密钥，重启就能聊天啦";
+                self.bubble_show(&format!("喵呜～我还没接入 AI！{OFFLINE_HINT}"));
                 if let Some(i) = &mut self.input {
+                    i.clear_pending();
+                    // 气泡 8 秒就没了，输入框里留一条更持久的引导
+                    i.input = format!("未接入 AI：{OFFLINE_HINT}");
                     i.clear_pending();
                 }
             }
