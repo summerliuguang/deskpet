@@ -6,7 +6,9 @@
 use fontdue::{Font, FontSettings};
 use std::sync::LazyLock;
 
-const FONT_BYTES: &[u8] = include_bytes!("../assets/fusion-pixel-12px-zh_hans.otf");
+// TTF（TrueType/glyf）版本：OTF（CFF）版本在 fontdue 里降部字形渲染错误
+// （p/P、q/Q、g/G 渲染成同一形状），TTF 轮廓 fontdue 支持完整
+const FONT_BYTES: &[u8] = include_bytes!("../assets/fusion-pixel-12px-zh_hans.ttf");
 
 /// 界面基准字号：12px 像素字体 × UI 缩放（四舍五入到整数像素）
 pub fn base_px() -> i32 {
@@ -203,6 +205,21 @@ mod tests {
         let mut buf = vec![0xFF88CCFF; 200 * 40];
         TEXT.draw(&mut buf, 200, 40, 12, 2, 2, &["喵呜 Hello 123".to_string()], (0, 0, 0), false);
         assert!(buf.iter().any(|&p| p != 0xFF88CCFF), "中英文混排没有画出任何字形");
+    }
+
+    /// 回归：降部小写（p/q/g/j/y）不能渲染成大写形态。
+    /// OTF（CFF 轮廓）版本在 fontdue 里 p 与 P 像素完全相同（deskPet 现象），
+    /// 换 TTF（glyf）版本后必须可区分。
+    #[test]
+    fn descender_lowercase_distinct_from_uppercase() {
+        let (w, h) = (40i32, 24i32);
+        for (lo, up) in [('p', 'P'), ('q', 'Q'), ('g', 'G'), ('j', 'J'), ('y', 'Y')] {
+            let mut a = vec![0u32; (w * h) as usize];
+            let mut b = vec![0u32; (w * h) as usize];
+            TEXT.draw(&mut a, w, h, 12, 4, 4, &[lo.to_string()], (0, 0, 0), false);
+            TEXT.draw(&mut b, w, h, 12, 4, 4, &[up.to_string()], (0, 0, 0), false);
+            assert_ne!(a, b, "{lo} 与 {up} 渲染成了同一形状（降部字形 bug）");
+        }
     }
 
     #[test]

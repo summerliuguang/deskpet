@@ -8,7 +8,7 @@ exe = open(path, 'rb').read()
 
 # 每个功能模块的标志性字符串（源码字面量 → 必须出现在 exe 中）
 checks = {
-    '内置字体(unifont)': b'OTTO',
+    '内置字体(TTF)': b'\x00\x01\x00\x00',
     '聊天窗': '思考中'.encode(),
     '待办窗': '待办清单'.encode(),
     '爬墙': '爬墙咯'.encode(),

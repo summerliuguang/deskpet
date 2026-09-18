@@ -290,7 +290,14 @@ pub fn persist_settings(pairs: &[(String, toml::Value)]) {
     for (k, val) in pairs {
         table.insert(k.clone(), val.clone());
     }
-    if let Ok(out) = toml::to_string(&table) {
+    if let Ok(mut out) = toml::to_string(&table) {
+        // 重写会丢掉模板/用户注释——api_key 未配置时补一段启用指引，
+        // 否则用户照模板取消注释的机会被第一次菜单开关抹掉（重复写不叠加）
+        if !table.contains_key("api_key") && !out.contains("# api_key") {
+            out.push_str(
+                "\n# AI 聊天/语音未启用：取消下行注释填入密钥后重启\n# base_url = \"https://your-gateway.example/v1\"\n# api_key = \"\"\n",
+            );
+        }
         let header = "# deskpet 配置（由菜单-设置页与手写配置共用）\n";
         let tmp = path.with_extension("toml.tmp");
         let wrote = std::fs::write(&tmp, format!("{header}\n{out}"))
@@ -390,6 +397,36 @@ mod tests {
         std::fs::write(&path, "api_key = \"x\"").unwrap();
         assert!(!ensure_default_template_at(&path));
         assert_eq!(std::fs::read_to_string(&path).unwrap(), "api_key = \"x\"");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// 回归：菜单开关重写配置会丢注释——api_key 未配置时必须补回启用指引，
+    /// 且重复写不叠加（用户曾反馈"配置里没有 key 的配置行"）
+    #[test]
+    fn persist_rewrite_keeps_api_key_hint() {
+        let dir = std::env::temp_dir().join(format!("deskpet_persist_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("deskpet.toml");
+        std::fs::write(&path, DEFAULT_TEMPLATE).unwrap();
+        // 模拟两次菜单开关写回（原配置全注释 = 解析后无 api_key 键）
+        for _ in 0..2 {
+            let existing = std::fs::read_to_string(&path).unwrap();
+            let mut table = existing
+                .parse::<toml::Value>()
+                .ok()
+                .and_then(|v| v.as_table().cloned())
+                .unwrap_or_default();
+            table.insert("voice".into(), toml::Value::Boolean(false));
+            let mut out = toml::to_string(&table).unwrap();
+            if !table.contains_key("api_key") && !out.contains("# api_key") {
+                out.push_str("\n# api_key = \"\"\n");
+            }
+            std::fs::write(&path, out).unwrap();
+        }
+        let final_text = std::fs::read_to_string(&path).unwrap();
+        assert!(final_text.contains("# api_key"), "重写后应保留 api_key 启用指引");
+        assert_eq!(final_text.matches("# api_key").count(), 1, "重复写不得叠加指引");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
